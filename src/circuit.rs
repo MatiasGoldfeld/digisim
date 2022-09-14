@@ -1,6 +1,5 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{hash_map::HashMap, HashSet};
-use std::convert::TryInto;
 use std::hash::Hash;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -256,12 +255,14 @@ impl Circuit {
     }
 }
 
+#[cfg(test)]
 struct Test {
     circuit: Rc<RefCell<Circuit>>,
     marked: RefCell<HashMap<String, Rc<RefCell<Wire>>>>,
     inputs: RefCell<Vec<Rc<RefCell<Trigger>>>>,
 }
 
+#[cfg(test)]
 impl Test {
     pub fn new() -> Self {
         let circuit = Rc::new(RefCell::new(Circuit::new()));
@@ -299,7 +300,7 @@ impl Test {
 
     pub fn run(&self, max_ticks: Ticks, debug: bool) -> RunResult {
         let mut circuit = self.circuit.as_ref().borrow_mut();
-        for ticks in 0..=max_ticks {
+        for ticks in 0..(max_ticks + 1) {
             if debug {
                 self.print_marked()
             };
@@ -346,11 +347,13 @@ impl Test {
     }
 }
 
+#[cfg(test)]
 struct Connector {
     test: Rc<Test>,
     wire: Rc<RefCell<Wire>>,
 }
 
+#[cfg(test)]
 impl Connector {
     pub fn new(test: Rc<Test>) -> Self {
         let wire = Rc::new(RefCell::new(Wire::new()));
@@ -461,11 +464,6 @@ mod test {
         println!("{:?}", ticks);
     }
 
-    struct Adder {
-        sum: Connector,
-        cout: Connector,
-    }
-
     fn or(a: &Connector, b: &Connector) -> Connector {
         Connector::or(vec![a, b].into_iter())
     }
@@ -510,6 +508,11 @@ mod test {
         gate_test_gen(nand, [true, true, true, false]);
         gate_test_gen(and, [false, false, false, true]);
         gate_test_gen(xor, [false, true, true, false]);
+    }
+
+    struct Adder {
+        sum: Connector,
+        cout: Connector,
     }
 
     fn adder(a: Connector, b: Connector, cin: Connector) -> Adder {
