@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::cell::{Cell, RefCell};
 use std::collections::{hash_map::HashMap, HashSet};
 use std::hash::Hash;
@@ -6,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 type Tick = u64;
 type Ticks = u64;
-type Nodes = HashMap<NodeId, Rc<RefCell<dyn Node>>>;
+type Nodes = HashMap<NodeId, Box<dyn Node>>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct NodeId(u64);
@@ -28,8 +29,13 @@ struct Scheduler {
 // TODO: Consider making [Node] an enum instead of a trait
 trait Node {
     fn id(&self) -> NodeId;
+    fn add_output(&mut self, node_id: NodeId);
     fn update(&self, scheduler: &mut Scheduler, nodes: &Nodes);
     fn apply_change(&self);
+    fn trigger(&self, _scheduler: &mut Scheduler, _new_active: bool) {
+        // TODO: this is gross pls remove
+        panic!("Not a trigger!")
+    }
 }
 
 impl Scheduler {
@@ -60,14 +66,9 @@ impl Scheduler {
     }
 
     fn drain_changed(&mut self, nodes: &Nodes) {
-        self.changed.drain().for_each(|node_id| {
-            nodes
-                .get(&node_id)
-                .unwrap()
-                .as_ref()
-                .borrow_mut()
-                .apply_change()
-        });
+        self.changed
+            .drain()
+            .for_each(|node_id| nodes.get(&node_id).unwrap().apply_change());
     }
 
     fn update(&mut self, nodes: &Nodes) {
@@ -78,23 +79,11 @@ impl Scheduler {
             .drain()
             .collect::<Vec<_>>()
             .into_iter()
-            .for_each(|node_id| {
-                nodes
-                    .get(&node_id)
-                    .unwrap()
-                    .as_ref()
-                    .borrow_mut()
-                    .update(self, nodes)
-            });
+            .for_each(|node_id| nodes.get(&node_id).unwrap().update(self, nodes));
         match self.queue.remove(&self.tick) {
-            Some(node_ids) => node_ids.into_iter().for_each(|node_id| {
-                nodes
-                    .get(&node_id)
-                    .unwrap()
-                    .as_ref()
-                    .borrow_mut()
-                    .update(self, nodes)
-            }),
+            Some(node_ids) => node_ids
+                .into_iter()
+                .for_each(|node_id| nodes.get(&node_id).unwrap().update(self, nodes)),
             None => (),
         };
         self.drain_changed(nodes);
@@ -129,19 +118,18 @@ impl Node for Wire {
         self.id
     }
 
+    fn add_output(&mut self, node_id: NodeId) {
+        self.outputs.insert(node_id);
+    }
+
     fn update(&self, scheduler: &mut Scheduler, nodes: &Nodes) {
         let new_active = self.inputs.values().any(|input| input.get());
         if new_active != self.active.get() {
             self.active.set(new_active);
             // TODO: Schedule output updates as to not potentially do them twice
-            self.outputs.iter().for_each(|output| {
-                nodes
-                    .get(output)
-                    .unwrap()
-                    .as_ref()
-                    .borrow_mut()
-                    .update(scheduler, nodes)
-            })
+            self.outputs
+                .iter()
+                .for_each(|output| nodes.get(output).unwrap().update(scheduler, nodes))
         };
     }
 
@@ -161,6 +149,13 @@ struct Inverter {
 impl Node for Inverter {
     fn id(&self) -> NodeId {
         self.id
+    }
+
+    fn add_output(&mut self, node_id: NodeId) {
+        match self.output {
+            Some(_) => panic!("Inserter already has output"),
+            None => self.output = Some(node_id),
+        }
     }
 
     fn update(&self, scheduler: &mut Scheduler, _nodes: &Nodes) {
@@ -194,15 +189,20 @@ impl Node for Trigger {
         self.id
     }
 
+    fn add_output(&mut self, node_id: NodeId) {
+        match self.output {
+            Some(_) => panic!("Trigger already has output"),
+            None => self.output = Some(node_id),
+        }
+    }
+
     fn update(&self, _scheduler: &mut Scheduler, _nodes: &Nodes) {}
 
     fn apply_change(&self) {
         self.active.set(self.next_active.get());
     }
-}
 
-impl Trigger {
-    pub fn trigger(&self, scheduler: &mut Scheduler, new_active: bool) {
+    fn trigger(&self, scheduler: &mut Scheduler, new_active: bool) {
         if new_active != self.next_active.get() {
             self.next_active.set(new_active);
             scheduler.enqueue_changed(self.id);
@@ -244,8 +244,8 @@ impl Circuit {
         RunResult::ReachedMaxTicks { max_ticks }
     }
 
-    fn add_node(&mut self, node: Rc<RefCell<dyn Node>>) {
-        let node_id = node.borrow().id();
+    fn add_node(&mut self, node: Box<dyn Node>) {
+        let node_id = node.id();
         match self.nodes.insert(node_id, node) {
             // TODO: Make this nicer
             Some(_) => panic!(),
@@ -253,58 +253,62 @@ impl Circuit {
         };
         self.scheduler.enqueue_next(node_id);
     }
+
+    fn get_node(&self, node_id: NodeId) -> &dyn Node {
+        self.nodes.get(&node_id).unwrap().borrow()
+    }
 }
 
 #[cfg(test)]
 struct Test {
-    circuit: Rc<RefCell<Circuit>>,
-    marked: RefCell<HashMap<String, Rc<RefCell<Wire>>>>,
-    inputs: RefCell<Vec<Rc<RefCell<Trigger>>>>,
+    circuit: Circuit,
+    marked: HashMap<String, Rc<Cell<bool>>>,
+    inputs: Vec<NodeId>,
 }
 
 #[cfg(test)]
 impl Test {
     pub fn new() -> Self {
-        let circuit = Rc::new(RefCell::new(Circuit::new()));
         Test {
-            circuit,
-            marked: RefCell::new(HashMap::new()),
-            inputs: RefCell::new(Vec::new()),
+            circuit: Circuit::new(),
+            marked: HashMap::new(),
+            inputs: Vec::new(),
         }
     }
 
-    fn add_node(&self, node: Rc<RefCell<dyn Node>>) {
-        self.circuit.as_ref().borrow_mut().add_node(node);
+    fn add_node(&mut self, node: Box<dyn Node>) {
+        self.circuit.add_node(node);
     }
 
-    fn add_input(&self, input: Rc<RefCell<Trigger>>) {
-        self.inputs.borrow_mut().push(input.clone());
+    fn add_input(&mut self, trigger_id: NodeId) {
+        self.inputs.push(trigger_id);
     }
 
-    fn set_trigger(&self, trigger: Rc<RefCell<Trigger>>, active: bool) {
-        trigger
-            .borrow()
-            .trigger(&mut self.circuit.as_ref().borrow_mut().scheduler, active);
+    fn set_trigger(&mut self, trigger_id: NodeId, active: bool) {
+        self.circuit
+            .nodes
+            .get(&trigger_id)
+            .unwrap()
+            .trigger(&mut self.circuit.scheduler, active);
     }
 
-    fn mark_wire(&self, name: String, wire: Rc<RefCell<Wire>>) {
-        self.marked.borrow_mut().insert(name, wire);
+    fn mark_wire(&mut self, name: String, wire_active: Rc<Cell<bool>>) {
+        self.marked.insert(name, wire_active);
     }
 
     fn print_marked(&self) {
         println!("Printing marked wires:");
-        for (name, wire) in self.marked.borrow().iter() {
-            println!("{name}: {}", wire.borrow().active.get());
+        for (name, wire_active) in self.marked.iter() {
+            println!("{name}: {}", wire_active.get());
         }
     }
 
-    pub fn run(&self, max_ticks: Ticks, debug: bool) -> RunResult {
-        let mut circuit = self.circuit.as_ref().borrow_mut();
+    pub fn run(&mut self, max_ticks: Ticks, debug: bool) -> RunResult {
         for ticks in 0..(max_ticks + 1) {
             if debug {
                 self.print_marked()
             };
-            match circuit.run(1) {
+            match self.circuit.run(1) {
                 RunResult::Finished { after_ticks: _ } => {
                     return RunResult::Finished { after_ticks: ticks }
                 }
@@ -318,22 +322,23 @@ impl Test {
         return RunResult::ReachedMaxTicks { max_ticks };
     }
 
-    pub fn run_all_inputs(&self, max_ticks: Ticks) -> RunResult {
-        let inputs = self.inputs.borrow_mut();
-        let num_inputs: u8 = inputs.len().try_into().unwrap();
+    pub fn run_all_inputs(&mut self, max_ticks: Ticks) -> RunResult {
+        let num_inputs: u8 = self.inputs.len().try_into().unwrap();
         let mut input: u32 = 0;
         let max_input: u32 = 1 << num_inputs;
         let mut ticks: Tick = 0;
         // println!("Running all {num_inputs} inputs in {max_input} tests...");
         while input < max_input {
             // println!("Running input '{input}'");
-            let circuit = &mut self.circuit.as_ref().borrow_mut();
-            let scheduler = &mut circuit.scheduler;
-            for (i, trigger) in inputs.iter().enumerate() {
+            for (i, trigger_id) in self.inputs.iter().cloned().enumerate() {
                 let active = (input & (1 << i)) != 0;
-                trigger.borrow().trigger(scheduler, active);
+                self.circuit
+                    .nodes
+                    .get(&trigger_id)
+                    .unwrap()
+                    .trigger(&mut self.circuit.scheduler, active);
             }
-            match circuit.run(max_ticks - ticks) {
+            match self.circuit.run(max_ticks - ticks) {
                 RunResult::Finished { after_ticks } => ticks += after_ticks,
                 RunResult::ReachedMaxTicks { max_ticks: _ } => {
                     return RunResult::ReachedMaxTicks { max_ticks }
@@ -349,16 +354,36 @@ impl Test {
 
 #[cfg(test)]
 struct Connector {
-    test: Rc<Test>,
-    wire: Rc<RefCell<Wire>>,
+    test: Rc<RefCell<Test>>,
+    wire_id: NodeId,
+    wire_active: Rc<Cell<bool>>,
 }
 
 #[cfg(test)]
 impl Connector {
-    pub fn new(test: Rc<Test>) -> Self {
-        let wire = Rc::new(RefCell::new(Wire::new()));
-        test.add_node(wire.clone());
-        Connector { test, wire }
+    fn of_wire(test: Rc<RefCell<Test>>, wire: Wire) -> Self {
+        let connector = Connector {
+            test: test.clone(),
+            wire_id: wire.id,
+            wire_active: wire.active.clone(),
+        };
+        test.borrow_mut().add_node(Box::new(wire));
+        connector
+    }
+
+    pub fn new(test: Rc<RefCell<Test>>) -> Self {
+        Self::of_wire(test, Wire::new())
+    }
+
+    fn add_output(&self, node_id: NodeId) {
+        self.test
+            .borrow_mut()
+            .circuit
+            .nodes
+            .get_mut(&self.wire_id)
+            .unwrap()
+            .as_mut()
+            .add_output(node_id)
     }
 
     pub fn or<'a, I>(connectors: I) -> Self
@@ -367,80 +392,68 @@ impl Connector {
     {
         let mut output_wire = Wire::new();
         let mut output_test = None;
-        for Connector {
-            test: input_test,
-            wire: input_wire,
-        } in connectors
-        {
+        for connector in connectors {
             match output_test.as_ref() {
-                Some(output_test) => assert!(Rc::ptr_eq(&input_test, output_test)),
-                None => output_test = Some(input_test.clone()),
+                Some(output_test) => assert!(Rc::ptr_eq(&connector.test, output_test)),
+                None => output_test = Some(connector.test.clone()),
             };
-            let mut input_wire = input_wire.as_ref().borrow_mut();
-            input_wire.outputs.insert(output_wire.id);
+            connector.add_output(output_wire.id);
             output_wire
                 .inputs
-                .insert(input_wire.id, input_wire.active.clone());
+                .insert(connector.wire_id, connector.wire_active.clone());
         }
         let test = output_test.unwrap();
-        let wire = Rc::new(RefCell::new(output_wire));
-        test.add_node(wire.clone());
-        Connector { test, wire }
+        Self::of_wire(test, output_wire)
     }
 
-    pub fn mark(self, name: String) -> Self {
-        self.test.mark_wire(name, self.wire.clone());
+    pub fn mark(&self, name: String) -> &Self {
+        self.test
+            .borrow_mut()
+            .mark_wire(name, self.wire_active.clone());
         self
     }
 
     pub fn invert(&self) -> Self {
         let id = NodeId::new();
-        let mut input_wire = self.wire.as_ref().borrow_mut();
         let mut output_wire = Wire::new();
-        let inverter = Inverter {
+        let inverter = Box::new(Inverter {
             id,
-            input: Some((input_wire.id(), input_wire.active.clone())),
+            input: Some((self.wire_id, self.wire_active.clone())),
             output: Some(output_wire.id()),
             active: Rc::new(Cell::new(true)),
             next_active: Cell::new(true),
-        };
-        input_wire.outputs.insert(id);
+        });
+        self.add_output(id);
         output_wire.inputs.insert(id, inverter.active.clone());
-        let wire = Rc::new(RefCell::new(output_wire));
-        self.test.add_node(wire.clone());
-        self.test.add_node(Rc::new(RefCell::new(inverter)));
-        Connector {
-            test: self.test.clone(),
-            wire,
-        }
+        self.test.borrow_mut().add_node(inverter);
+        Self::of_wire(self.test.clone(), output_wire)
     }
 
-    pub fn trigger(test: Rc<Test>) -> (Self, Rc<RefCell<Trigger>>) {
+    pub fn trigger(test: Rc<RefCell<Test>>) -> (Self, NodeId) {
+        let id = NodeId::new();
         let mut wire = Wire::new();
         let trigger = Trigger {
-            id: NodeId::new(),
+            id,
             output: Some(wire.id),
             active: Rc::new(Cell::new(false)),
             next_active: Cell::new(false),
         };
         wire.inputs.insert(trigger.id, trigger.active.clone());
-        let trigger = Rc::new(RefCell::new(trigger));
-        let wire = Rc::new(RefCell::new(wire));
-        test.add_node(trigger.clone());
-        test.add_node(wire.clone());
-        (Connector { test, wire }, trigger)
+        let trigger = Box::new(trigger);
+        test.borrow_mut().add_node(trigger);
+        (Self::of_wire(test, wire), id)
     }
 
-    pub fn input(test: Rc<Test>) -> Self {
-        let (connector, trigger) = Self::trigger(test.clone());
-        test.add_input(trigger);
+    pub fn input(test: Rc<RefCell<Test>>) -> Self {
+        let (connector, trigger_id) = Self::trigger(test.clone());
+        test.borrow_mut().add_input(trigger_id);
         connector
     }
 }
 
 #[cfg(test)]
 mod test {
-    use std::rc::Rc;
+    use std::{cell::RefCell, rc::Rc};
 
     use crate::circuit::Test;
 
@@ -448,7 +461,7 @@ mod test {
 
     #[test]
     fn inverter_series_test() {
-        let test = Rc::new(Test::new());
+        let test = Rc::new(RefCell::new(Test::new()));
         Connector::new(test.clone())
             .invert()
             .mark("post-first".to_string())
@@ -460,7 +473,7 @@ mod test {
             .mark("post-forth".to_string())
             .invert()
             .mark("post-fifth".to_string());
-        let ticks = test.run(100, false);
+        let ticks = test.borrow_mut().run(100, false);
         println!("{:?}", ticks);
     }
 
@@ -485,7 +498,7 @@ mod test {
     }
 
     fn gate_test_gen(f: fn(&Connector, &Connector) -> Connector, expecteds: [bool; 4]) {
-        let test = Rc::new(Test::new());
+        let test = Rc::new(RefCell::new(Test::new()));
         let (a, trigger_a) = Connector::trigger(test.clone());
         let (b, trigger_b) = Connector::trigger(test.clone());
         let out = f(&a, &b);
@@ -493,10 +506,11 @@ mod test {
             .into_iter()
             .zip(expecteds.into_iter());
         for ((in_a, in_b), expected) in expecteds {
+            let mut test = test.borrow_mut();
             test.set_trigger(trigger_a.clone(), in_a);
             test.set_trigger(trigger_b.clone(), in_b);
             test.run(100, false);
-            let result = out.wire.as_ref().borrow().active.get();
+            let result = out.wire_active.get();
             assert_eq!(result, expected);
         }
     }
@@ -524,7 +538,7 @@ mod test {
         Adder { sum, cout }
     }
 
-    fn adder_chain(test: Rc<Test>, n: u8, cin: Connector) {
+    fn adder_chain(test: Rc<RefCell<Test>>, n: u8, cin: Connector) {
         if n > 0 {
             let a = Connector::input(test.clone());
             let b = Connector::input(test.clone());
@@ -538,17 +552,17 @@ mod test {
 
     #[test]
     fn adder_test() {
-        let test = Rc::new(Test::new());
+        let test = Rc::new(RefCell::new(Test::new()));
         adder_chain(test.clone(), 8, Connector::new(test.clone()));
-        let result = test.run_all_inputs(500_000);
+        let result = test.borrow_mut().run_all_inputs(500_000);
         println!("{result:?}");
     }
 
     #[test]
     fn random_adder_test() {
-        let test = Rc::new(Test::new());
+        let test = Rc::new(RefCell::new(Test::new()));
         adder_chain(test.clone(), 8, Connector::new(test.clone()));
-        let result = test.run_all_inputs(500_000);
+        let result = test.borrow_mut().run_all_inputs(500_000);
         println!("{result:?}");
     }
 }
