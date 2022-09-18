@@ -6,4 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-fyrox = "0.27.1"
+bevy = "0.8.1"
+bevy_rapier3d = "0.16.2"
+rand = "0.8.5"

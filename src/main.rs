@@ -1,284 +1,313 @@
-use fyrox::{
-    core::{
-        algebra::{Matrix4, UnitQuaternion, Vector3},
-        color::Color,
-        parking_lot::Mutex,
-        pool::Handle,
-        sstorage::ImmutableString,
-        uuid::{uuid, Uuid},
-    },
-    engine::{
-        executor::Executor, resource_manager::ResourceManager, Engine, EngineInitParams,
-        SerializationContext,
-    },
-    event::{DeviceEvent, ElementState, Event, VirtualKeyCode, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    material::{self, Material},
-    plugin::{Plugin, PluginConstructor, PluginContext},
-    resource::texture::TextureWrapMode,
-    scene::{
-        base::BaseBuilder,
-        camera::{Camera, CameraBuilder, SkyBox, SkyBoxBuilder},
-        collider::{ColliderBuilder, ColliderShape},
-        light::{point::PointLightBuilder, BaseLightBuilder},
-        mesh::{
-            surface::{SurfaceBuilder, SurfaceData},
-            MeshBuilder,
-        },
-        node::{Node, TypeUuidProvider},
-        rigidbody::RigidBodyBuilder,
-        transform::TransformBuilder,
-        Scene,
-    },
-    window::WindowBuilder,
+use std::{cell::Cell, sync::Arc};
+
+use bevy::{
+    input::mouse::MouseMotion,
+    prelude::*,
+    utils::{HashMap, HashSet},
 };
-use std::{borrow::BorrowMut, sync::Arc, time};
-
-mod circuit;
-
-// Our game logic will be updated at 60 Hz rate.
-const TIMESTEP: f32 = 1.0 / 60.0;
+use bevy_rapier3d::prelude::*;
+use transist::circuit;
 
 #[derive(Default)]
-struct InputController {
-    strafe_left: bool,
-    strafe_right: bool,
-    forward: bool,
-    backward: bool,
-    up: bool,
-    down: bool,
+struct CameraState {
+    pitch: f32,
+    yaw: f32,
 }
 
-struct Game {
-    scene: Handle<Scene>,
-    camera: Handle<Node>,
-    input_controller: InputController,
-}
+impl CameraState {
+    fn camera_movement(
+        windows: Res<Windows>,
+        mut camera_state: ResMut<CameraState>,
+        keyboard_input: Res<Input<KeyCode>>,
+        mut mouse_motion_events: EventReader<MouseMotion>,
+        mut transforms: Query<&mut Transform, With<Camera3d>>,
+    ) {
+        let window = windows.get_primary().unwrap();
+        if !window.cursor_locked() {
+            return;
+        }
 
-impl Plugin for Game {
-    fn id(&self) -> Uuid {
-        GameConstructor::type_uuid()
-    }
+        let mut transform = transforms.get_single_mut().unwrap();
 
-    fn update(&mut self, context: &mut PluginContext, _control_flow: &mut ControlFlow) {
-        let scene = &mut context.scenes[self.scene];
+        let boost = if keyboard_input.pressed(KeyCode::LShift) {
+            2.0
+        } else {
+            1.0
+        };
+        let move_speed = 0.1 * boost;
+        let rotate_speed = 0.000003;
 
-        fn bool_to_float(b: bool) -> f32 {
-            if b {
-                1.0
+        let input = |key_code: KeyCode| {
+            if keyboard_input.pressed(key_code) {
+                move_speed
             } else {
                 0.0
             }
+        };
+
+        let x = input(KeyCode::D) - input(KeyCode::A);
+        let z = input(KeyCode::S) - input(KeyCode::W);
+        let y = input(KeyCode::R) - input(KeyCode::F);
+
+        let mut translation = transform.rotation * Vec3::new(x, 0.0, z);
+        translation.y += y;
+        transform.translation += translation;
+
+        let window_scale = window.width().min(window.height());
+        for mouse_motion in mouse_motion_events.iter() {
+            camera_state.pitch = (camera_state.pitch
+                - rotate_speed * mouse_motion.delta.y * window_scale)
+                .clamp(-85f32.to_radians(), 85f32.to_radians());
+            camera_state.yaw -= rotate_speed * mouse_motion.delta.x * window_scale;
+            transform.rotation =
+                Quat::from_rotation_y(camera_state.yaw) * Quat::from_rotation_x(camera_state.pitch);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Coord {
+    x: i32,
+    y: i32,
+    z: i32,
+}
+
+enum CircuitNodeType {
+    Wire {
+        active: Arc<Cell<bool>>,
+        wires: HashMap<Coord, Entity>,
+    },
+    Inverter,
+}
+
+struct CircuitNode {
+    node_id: circuit::NodeId,
+    contents: CircuitNodeType,
+}
+
+struct Game {
+    circuit: circuit::Circuit,
+    block_mesh: Handle<Mesh>,
+    blocks: HashMap<Coord, Entity>,
+}
+
+impl FromWorld for Game {
+    fn from_world(world: &mut World) -> Self {
+        let block_mesh = world
+            .resource_mut::<Mut<Assets<Mesh>>>()
+            .add(Mesh::from(shape::Cube { size: 1.0 }));
+        Game {
+            circuit: circuit::Circuit::new(),
+            block_mesh,
+            blocks: HashMap::new(),
+        }
+    }
+}
+
+impl Game {
+    fn spawn_block(
+        &self,
+        commands: &mut Commands,
+        materials: &mut Assets<StandardMaterial>,
+        x: i32,
+        y: i32,
+        z: i32,
+        color: Color,
+    ) {
+        commands
+            .spawn_bundle(PbrBundle {
+                mesh: self.block_mesh.clone(),
+                material: materials.add(StandardMaterial {
+                    emissive: color,
+                    // perceptual_roughness: 1.0,
+                    // reflectance: 0.0,
+                    ..Default::default()
+                }),
+                transform: Transform::from_xyz(x as f32, y as f32, z as f32),
+                ..default()
+            })
+            .insert(Collider::cuboid(0.5, 0.5, 0.5));
+    }
+}
+
+pub struct Voxels;
+
+impl Voxels {
+    fn setup(
+        game: Res<Game>,
+        mut commands: Commands,
+        mut meshes: ResMut<Assets<Mesh>>,
+        mut materials: ResMut<Assets<StandardMaterial>>,
+    ) {
+        let size = 20;
+
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        for x in 0..size {
+            for z in 0..size {
+                game.spawn_block(
+                    &mut commands,
+                    &mut materials,
+                    x,
+                    0,
+                    z,
+                    Color::rgb_u8(
+                        rng.gen_range(0..=255),
+                        rng.gen_range(0..=255),
+                        rng.gen_range(0..=255),
+                    ),
+                )
+            }
         }
 
-        let offset_x: f32 = 0.1
-            * (bool_to_float(self.input_controller.strafe_left)
-                - bool_to_float(self.input_controller.strafe_right));
-        let offset_z: f32 = 0.1
-            * (bool_to_float(self.input_controller.forward)
-                - bool_to_float(self.input_controller.backward));
-        let offset_y: f32 = 0.1
-            * (bool_to_float(self.input_controller.up) - bool_to_float(self.input_controller.down));
+        let middle_block = Vec3::new(10.0, 1.0, 10.0);
+        game.spawn_block(
+            &mut commands,
+            &mut materials,
+            10,
+            1,
+            10,
+            Color::rgb_u8(30, 180, 60),
+        );
 
-        scene.graph[self.camera]
-            .as_camera_mut()
-            .local_transform_mut()
-            .offset(Vector3::new(offset_x, offset_y, offset_z));
+        // let scale = 1.0 / 10.0;
+        // let proj_size = 100.0;
+        // commands.spawn_bundle(DirectionalLightBundle {
+        //     directional_light: DirectionalLight {
+        //         illuminance: 20000.0,
+        //         shadows_enabled: true,
+        //         // shadow_depth_bias: 0.07,
+        //         shadow_projection: OrthographicProjection {
+        //             left: -proj_size,
+        //             right: proj_size,
+        //             bottom: -proj_size,
+        //             top: proj_size,
+        //             near: -proj_size,
+        //             far: proj_size,
+        //             scale,
+        //             ..Default::default()
+        //         },
+        //         ..default()
+        //     },
+        //     transform: Transform::from_xyz(5.0, 10.0, 3.0).looking_at(middle_block, Vec3::Y),
+        //     ..default()
+        // });
+        commands.insert_resource(AmbientLight {
+            brightness: 0.05,
+            ..Default::default()
+        });
+
+        // camera
+        {
+            let transform = Transform::from_xyz(0.0, 2.5, 0.0).looking_at(middle_block, Vec3::Y);
+            commands.spawn_bundle(Camera3dBundle {
+                transform,
+                ..default()
+            });
+
+            let (pitch, yaw, _) = transform.rotation.to_euler(EulerRot::XYZ);
+            commands.insert_resource(CameraState { pitch, yaw })
+        }
+
+        commands
+            .spawn_bundle(NodeBundle {
+                style: Style {
+                    size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
+                    position_type: PositionType::Absolute,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..Default::default()
+                },
+                color: Color::rgba(0.0, 0.0, 0.0, 0.0).into(),
+                ..Default::default()
+            })
+            .with_children(|parent| {
+                parent.spawn_bundle(ImageBundle {
+                    color: Color::WHITE.into(),
+                    style: Style {
+                        size: Size::new(Val::Px(4.0), Val::Px(4.0)),
+                        ..default()
+                    },
+                    ..default()
+                });
+            });
     }
 
-    fn on_os_event(
-        &mut self,
-        event: &Event<()>,
-        _context: PluginContext,
-        _control_flow: &mut ControlFlow,
+    fn grab_mouse(
+        mut windows: ResMut<Windows>,
+        mouse: Res<Input<MouseButton>>,
+        key: Res<Input<KeyCode>>,
     ) {
-        if let Event::WindowEvent {
-            event: WindowEvent::KeyboardInput { input, .. },
-            ..
-        } = event
-        {
-            if let Some(key_code) = input.virtual_keycode {
-                match key_code {
-                    VirtualKeyCode::A => {
-                        self.input_controller.strafe_left = input.state == ElementState::Pressed
+        let window = windows.get_primary_mut().unwrap();
+        if mouse.just_pressed(MouseButton::Left) {
+            window.set_cursor_visibility(false);
+            window.set_cursor_lock_mode(true);
+        }
+        if key.just_pressed(KeyCode::Escape) {
+            window.set_cursor_visibility(true);
+            window.set_cursor_lock_mode(false);
+        }
+    }
+
+    fn cursor_ray(
+        game: Res<Game>,
+        mut commands: Commands,
+        mut materials: ResMut<Assets<StandardMaterial>>,
+        mouse: Res<Input<MouseButton>>,
+        camera_transforms: Query<&Transform, With<Camera3d>>,
+        rapier_context: Res<RapierContext>,
+        transform_query: Query<&Transform>,
+    ) {
+        let build = mouse.just_pressed(MouseButton::Right);
+        let destroy = mouse.just_pressed(MouseButton::Left);
+        if build || destroy {
+            let camera_transform = camera_transforms.get_single().unwrap();
+            // TODO: Doesn't need normal for destroy
+            if let Some((entity, intersection)) = rapier_context.cast_ray_and_get_normal(
+                camera_transform.translation,
+                camera_transform.rotation * Vec3::NEG_Z,
+                15.0,
+                false,
+                QueryFilter::only_fixed(),
+            ) {
+                if build {
+                    if let Ok(transform) = transform_query.get(entity) {
+                        let Vec3 { x, y, z } = transform.translation + intersection.normal;
+                        info!("Block created at {x}, {y}, {z}");
+                        game.spawn_block(
+                            &mut commands,
+                            &mut materials,
+                            x as i32,
+                            y as i32,
+                            z as i32,
+                            Color::WHITE,
+                        );
                     }
-                    VirtualKeyCode::D => {
-                        self.input_controller.strafe_right = input.state == ElementState::Pressed
-                    }
-                    VirtualKeyCode::W => {
-                        self.input_controller.forward = input.state == ElementState::Pressed
-                    }
-                    VirtualKeyCode::S => {
-                        self.input_controller.backward = input.state == ElementState::Pressed
-                    }
-                    VirtualKeyCode::R => {
-                        self.input_controller.up = input.state == ElementState::Pressed
-                    }
-                    VirtualKeyCode::F => {
-                        self.input_controller.down = input.state == ElementState::Pressed
-                    }
-                    _ => (),
+                } else if destroy {
+                    commands.entity(entity).despawn();
                 }
             }
         }
     }
 }
 
-impl Game {
-    pub fn new(context: &mut PluginContext) -> Self {
-        let mut scene = Scene::new();
-
-        // Next create a camera, it is our "eyes" in the world.
-        // This can also be made in editor, but for educational purpose we'll made it by hand.
-        let camera = CameraBuilder::new(
-            BaseBuilder::new().with_local_transform(
-                TransformBuilder::new()
-                    .with_local_position(Vector3::new(0.0, 6.0, -12.0))
-                    .build(),
-            ),
-        )
-        .build(&mut scene.graph);
-
-        // Set ambient light.
-        scene.ambient_lighting_color = Color::opaque(200, 200, 200);
-
-        // Add some light.
-        PointLightBuilder::new(BaseLightBuilder::new(
-            BaseBuilder::new().with_local_transform(
-                TransformBuilder::new()
-                    .with_local_position(Vector3::new(0.0, 12.0, 0.0))
-                    .build(),
-            ),
-        ))
-        .with_radius(20.0)
-        .build(&mut scene.graph);
-
-        let mut material = Material::standard();
-        material
-            .set_property(
-                &ImmutableString::new("diffuseColor"),
-                material::PropertyValue::Color(Color::opaque(200, 20, 20)),
-            )
-            .unwrap();
-
-        // Add floor.
-        MeshBuilder::new(
-            BaseBuilder::new().with_local_transform(
-                TransformBuilder::new()
-                    .with_local_position(Vector3::new(0.0, -0.25, 0.0))
-                    .build(),
-            ),
-        )
-        .with_surfaces(vec![SurfaceBuilder::new(Arc::new(Mutex::new(
-            SurfaceData::make_cube(Matrix4::new_nonuniform_scaling(&Vector3::new(
-                25.0, 0.25, 25.0,
-            ))),
-        )))
-        .with_material(Arc::new(Mutex::new(material)))
-        .build()])
-        .build(&mut scene.graph);
-
-        Self {
-            camera,
-            scene: context.scenes.add(scene),
-            input_controller: InputController::default(),
-        }
+impl Plugin for Voxels {
+    fn build(&self, app: &mut App) {
+        app.add_startup_system(Voxels::setup)
+            .init_resource::<Game>()
+            .add_system(Voxels::grab_mouse)
+            .add_system(Voxels::cursor_ray)
+            .add_system(CameraState::camera_movement);
     }
 }
-
-struct GameConstructor;
-
-impl TypeUuidProvider for GameConstructor {
-    fn type_uuid() -> Uuid {
-        uuid!("f615ac42-b259-4a23-bb44-407d753ac178")
-    }
-}
-
-impl PluginConstructor for GameConstructor {
-    fn create_instance(
-        &self,
-        _override_scene: Handle<Scene>,
-        mut context: PluginContext,
-    ) -> Box<dyn Plugin> {
-        Box::new(Game::new(&mut context))
-    }
-}
-
-// fn _main() {
-//     // Configure main window first.
-//     let window_builder = WindowBuilder::new().with_title("3D Shooter Tutorial");
-//     // Create event loop that will be used to "listen" events from the OS.
-//     let event_loop = EventLoop::new();
-
-//     // Finally create an instance of the engine.
-//     let serialization_context = Arc::new(SerializationContext::new());
-//     let mut engine = Engine::new(EngineInitParams {
-//         window_builder,
-//         resource_manager: ResourceManager::new(serialization_context.clone()),
-//         serialization_context,
-//         events_loop: &event_loop,
-//         vsync: false,
-//     })
-//     .unwrap();
-
-//     // Initialize game instance. It is empty for now.
-//     let mut game = Game::new(&mut engine);
-
-//     // Run the event loop of the main window. which will respond to OS and window events and update
-//     // engine's state accordingly. Engine lets you to decide which event should be handled,
-//     // this is a minimal working example of how it should be.
-//     let clock = time::Instant::now();
-
-//     let mut elapsed_time = 0.0;
-//     event_loop.run(move |event, _, control_flow| {
-//         match event {
-//             Event::MainEventsCleared => {
-//                 // This main game loop - it has fixed time step which means that game
-//                 // code will run at fixed speed even if renderer can't give you desired
-//                 // 60 fps.
-//                 let mut dt = clock.elapsed().as_secs_f32() - elapsed_time;
-//                 while dt >= TIMESTEP {
-//                     dt -= TIMESTEP;
-//                     elapsed_time += TIMESTEP;
-
-//                     // // Run our game's logic.
-//                     // game.update();
-
-//                     // Update engine each frame.
-//                     engine.update(TIMESTEP, control_flow);
-//                 }
-
-//                 // Rendering must be explicitly requested and handled after RedrawRequested event is received.
-//                 engine.get_window().request_redraw();
-//             }
-//             Event::RedrawRequested(_) => {
-//                 // Render at max speed - it is not tied to the game code.
-//                 engine.render().unwrap();
-//             }
-//             Event::WindowEvent { event, .. } => match event {
-//                 WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
-//                 WindowEvent::KeyboardInput { input, .. } => {
-//                     // Exit game by hitting Escape.
-//                     if let Some(VirtualKeyCode::Escape) = input.virtual_keycode {
-//                         *control_flow = ControlFlow::Exit
-//                     }
-//                 }
-//                 WindowEvent::Resized(size) => {
-//                     // It is very important to handle Resized event from window, because
-//                     // renderer knows nothing about window size - it must be notified
-//                     // directly when window size has changed.
-//                     engine.set_frame_size(size.into()).unwrap();
-//                 }
-//                 _ => (),
-//             },
-//             _ => *control_flow = ControlFlow::Poll,
-//         }
-//     });
-// }
 
 fn main() {
-    let mut executor = Executor::new();
-    executor.get_window().set_title("Transist");
-    executor.add_plugin_constructor(GameConstructor);
-    executor.run()
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .add_plugin(RapierPhysicsPlugin::<NoUserData>::default())
+        .add_plugin(RapierDebugRenderPlugin::default())
+        .add_plugin(Voxels)
+        .add_plugin(bevy::diagnostic::LogDiagnosticsPlugin::default())
+        .add_plugin(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default())
+        .run();
 }

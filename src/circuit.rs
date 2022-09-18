@@ -1,16 +1,17 @@
 use std::borrow::Borrow;
 use std::cell::{Cell, RefCell};
 use std::collections::{hash_map::HashMap, HashSet};
+use std::fmt::Debug;
 use std::hash::Hash;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 type Tick = u64;
 type Ticks = u64;
 type Nodes = HashMap<NodeId, Box<dyn Node>>;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct NodeId(u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NodeId(u64);
 
 impl NodeId {
     fn new() -> Self {
@@ -19,6 +20,7 @@ impl NodeId {
     }
 }
 
+#[derive(Debug)]
 struct Scheduler {
     tick: Tick,
     next: HashSet<NodeId>,
@@ -27,7 +29,7 @@ struct Scheduler {
 }
 
 // TODO: Consider making [Node] an enum instead of a trait
-trait Node {
+trait Node: Debug + Send + Sync {
     fn id(&self) -> NodeId;
     fn add_output(&mut self, node_id: NodeId);
     fn update(&self, scheduler: &mut Scheduler, nodes: &Nodes);
@@ -95,11 +97,12 @@ impl Scheduler {
     }
 }
 
+#[derive(Debug)]
 struct Wire {
     id: NodeId,
-    inputs: HashMap<NodeId, Rc<Cell<bool>>>,
+    inputs: HashMap<NodeId, Arc<AtomicBool>>,
     outputs: HashSet<NodeId>,
-    active: Rc<Cell<bool>>,
+    active: Arc<AtomicBool>,
 }
 
 impl Wire {
@@ -110,6 +113,21 @@ impl Wire {
             outputs: Default::default(),
             active: Default::default(),
         }
+    }
+}
+
+trait RelaxedAtomic {
+    fn get(&self) -> bool;
+    fn set(&self, val: bool);
+}
+
+impl RelaxedAtomic for AtomicBool {
+    fn get(&self) -> bool {
+        self.load(Ordering::Relaxed)
+    }
+
+    fn set(&self, val: bool) {
+        self.store(val, Ordering::Relaxed)
     }
 }
 
@@ -138,12 +156,13 @@ impl Node for Wire {
 
 // TODO: Perhaps have some 0-node_id stub node which is always is not active
 // and does not update
+#[derive(Debug)]
 struct Inverter {
     id: NodeId,
-    input: Option<(NodeId, Rc<Cell<bool>>)>,
+    input: Option<(NodeId, Arc<AtomicBool>)>,
     output: Option<NodeId>,
-    active: Rc<Cell<bool>>,
-    next_active: Cell<bool>,
+    active: Arc<AtomicBool>,
+    next_active: AtomicBool,
 }
 
 impl Node for Inverter {
@@ -177,11 +196,12 @@ impl Node for Inverter {
     }
 }
 
+#[derive(Debug)]
 struct Trigger {
     id: NodeId,
     output: Option<NodeId>,
-    active: Rc<Cell<bool>>,
-    next_active: Cell<bool>,
+    active: Arc<AtomicBool>,
+    next_active: AtomicBool,
 }
 
 impl Node for Trigger {
@@ -214,13 +234,14 @@ impl Node for Trigger {
     }
 }
 
-struct Circuit {
+#[derive(Debug)]
+pub struct Circuit {
     scheduler: Scheduler,
     nodes: Nodes,
 }
 
 #[derive(Debug)]
-enum RunResult {
+pub enum RunResult {
     Finished { after_ticks: Ticks },
     ReachedMaxTicks { max_ticks: Ticks },
 }
@@ -261,8 +282,8 @@ impl Circuit {
 
 #[cfg(test)]
 struct Test {
-    circuit: Circuit,
-    marked: HashMap<String, Rc<Cell<bool>>>,
+    Circuit: Circuit,
+    marked: HashMap<String, Arc<AtomicBool>>,
     inputs: Vec<NodeId>,
 }
 
@@ -270,14 +291,14 @@ struct Test {
 impl Test {
     pub fn new() -> Self {
         Test {
-            circuit: Circuit::new(),
+            Circuit: Circuit::new(),
             marked: HashMap::new(),
             inputs: Vec::new(),
         }
     }
 
     fn add_node(&mut self, node: Box<dyn Node>) {
-        self.circuit.add_node(node);
+        self.Circuit.add_node(node);
     }
 
     fn add_input(&mut self, trigger_id: NodeId) {
@@ -285,14 +306,14 @@ impl Test {
     }
 
     fn set_trigger(&mut self, trigger_id: NodeId, active: bool) {
-        self.circuit
+        self.Circuit
             .nodes
             .get(&trigger_id)
             .unwrap()
-            .trigger(&mut self.circuit.scheduler, active);
+            .trigger(&mut self.Circuit.scheduler, active);
     }
 
-    fn mark_wire(&mut self, name: String, wire_active: Rc<Cell<bool>>) {
+    fn mark_wire(&mut self, name: String, wire_active: Arc<AtomicBool>) {
         self.marked.insert(name, wire_active);
     }
 
@@ -308,7 +329,7 @@ impl Test {
             if debug {
                 self.print_marked()
             };
-            match self.circuit.run(1) {
+            match self.Circuit.run(1) {
                 RunResult::Finished { after_ticks: _ } => {
                     return RunResult::Finished { after_ticks: ticks }
                 }
@@ -332,13 +353,13 @@ impl Test {
             // println!("Running input '{input}'");
             for (i, trigger_id) in self.inputs.iter().cloned().enumerate() {
                 let active = (input & (1 << i)) != 0;
-                self.circuit
+                self.Circuit
                     .nodes
                     .get(&trigger_id)
                     .unwrap()
-                    .trigger(&mut self.circuit.scheduler, active);
+                    .trigger(&mut self.Circuit.scheduler, active);
             }
-            match self.circuit.run(max_ticks - ticks) {
+            match self.Circuit.run(max_ticks - ticks) {
                 RunResult::Finished { after_ticks } => ticks += after_ticks,
                 RunResult::ReachedMaxTicks { max_ticks: _ } => {
                     return RunResult::ReachedMaxTicks { max_ticks }
@@ -354,14 +375,14 @@ impl Test {
 
 #[cfg(test)]
 struct Connector {
-    test: Rc<RefCell<Test>>,
+    test: Arc<RefCell<Test>>,
     wire_id: NodeId,
-    wire_active: Rc<Cell<bool>>,
+    wire_active: Arc<AtomicBool>,
 }
 
 #[cfg(test)]
 impl Connector {
-    fn of_wire(test: Rc<RefCell<Test>>, wire: Wire) -> Self {
+    fn of_wire(test: Arc<RefCell<Test>>, wire: Wire) -> Self {
         let connector = Connector {
             test: test.clone(),
             wire_id: wire.id,
@@ -371,14 +392,14 @@ impl Connector {
         connector
     }
 
-    pub fn new(test: Rc<RefCell<Test>>) -> Self {
+    pub fn new(test: Arc<RefCell<Test>>) -> Self {
         Self::of_wire(test, Wire::new())
     }
 
     fn add_output(&self, node_id: NodeId) {
         self.test
             .borrow_mut()
-            .circuit
+            .Circuit
             .nodes
             .get_mut(&self.wire_id)
             .unwrap()
@@ -394,7 +415,7 @@ impl Connector {
         let mut output_test = None;
         for connector in connectors {
             match output_test.as_ref() {
-                Some(output_test) => assert!(Rc::ptr_eq(&connector.test, output_test)),
+                Some(output_test) => assert!(Arc::ptr_eq(&connector.test, output_test)),
                 None => output_test = Some(connector.test.clone()),
             };
             connector.add_output(output_wire.id);
@@ -420,8 +441,8 @@ impl Connector {
             id,
             input: Some((self.wire_id, self.wire_active.clone())),
             output: Some(output_wire.id()),
-            active: Rc::new(Cell::new(true)),
-            next_active: Cell::new(true),
+            active: Arc::new(AtomicBool::new(true)),
+            next_active: AtomicBool::new(true),
         });
         self.add_output(id);
         output_wire.inputs.insert(id, inverter.active.clone());
@@ -429,14 +450,14 @@ impl Connector {
         Self::of_wire(self.test.clone(), output_wire)
     }
 
-    pub fn trigger(test: Rc<RefCell<Test>>) -> (Self, NodeId) {
+    pub fn trigger(test: Arc<RefCell<Test>>) -> (Self, NodeId) {
         let id = NodeId::new();
         let mut wire = Wire::new();
         let trigger = Trigger {
             id,
             output: Some(wire.id),
-            active: Rc::new(Cell::new(false)),
-            next_active: Cell::new(false),
+            active: Arc::new(AtomicBool::new(false)),
+            next_active: AtomicBool::new(false),
         };
         wire.inputs.insert(trigger.id, trigger.active.clone());
         let trigger = Box::new(trigger);
@@ -444,7 +465,7 @@ impl Connector {
         (Self::of_wire(test, wire), id)
     }
 
-    pub fn input(test: Rc<RefCell<Test>>) -> Self {
+    pub fn input(test: Arc<RefCell<Test>>) -> Self {
         let (connector, trigger_id) = Self::trigger(test.clone());
         test.borrow_mut().add_input(trigger_id);
         connector
@@ -453,15 +474,15 @@ impl Connector {
 
 #[cfg(test)]
 mod test {
-    use std::{cell::RefCell, rc::Rc};
+    use std::{cell::RefCell, sync::Arc};
 
-    use crate::circuit::Test;
+    use crate::circuit::{RelaxedAtomic, Test};
 
     use super::Connector;
 
     #[test]
     fn inverter_series_test() {
-        let test = Rc::new(RefCell::new(Test::new()));
+        let test = Arc::new(RefCell::new(Test::new()));
         Connector::new(test.clone())
             .invert()
             .mark("post-first".to_string())
@@ -498,7 +519,7 @@ mod test {
     }
 
     fn gate_test_gen(f: fn(&Connector, &Connector) -> Connector, expecteds: [bool; 4]) {
-        let test = Rc::new(RefCell::new(Test::new()));
+        let test = Arc::new(RefCell::new(Test::new()));
         let (a, trigger_a) = Connector::trigger(test.clone());
         let (b, trigger_b) = Connector::trigger(test.clone());
         let out = f(&a, &b);
@@ -538,7 +559,7 @@ mod test {
         Adder { sum, cout }
     }
 
-    fn adder_chain(test: Rc<RefCell<Test>>, n: u8, cin: Connector) {
+    fn adder_chain(test: Arc<RefCell<Test>>, n: u8, cin: Connector) {
         if n > 0 {
             let a = Connector::input(test.clone());
             let b = Connector::input(test.clone());
@@ -552,7 +573,7 @@ mod test {
 
     #[test]
     fn adder_test() {
-        let test = Rc::new(RefCell::new(Test::new()));
+        let test = Arc::new(RefCell::new(Test::new()));
         adder_chain(test.clone(), 8, Connector::new(test.clone()));
         let result = test.borrow_mut().run_all_inputs(500_000);
         println!("{result:?}");
@@ -560,7 +581,7 @@ mod test {
 
     #[test]
     fn random_adder_test() {
-        let test = Rc::new(RefCell::new(Test::new()));
+        let test = Arc::new(RefCell::new(Test::new()));
         adder_chain(test.clone(), 8, Connector::new(test.clone()));
         let result = test.borrow_mut().run_all_inputs(500_000);
         println!("{result:?}");
