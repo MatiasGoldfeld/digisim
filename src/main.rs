@@ -3,10 +3,13 @@ use std::{cell::Cell, sync::Arc};
 use bevy::{
     input::mouse::MouseMotion,
     prelude::*,
-    utils::{HashMap, HashSet},
+    utils::{Duration, HashMap, HashSet},
 };
 use bevy_rapier3d::prelude::*;
-use transist::circuit;
+use transist::{
+    circuit::{self, Circuit},
+    circuit_naive::CircuitNaive as UsedCircuit,
+};
 
 #[derive(Default)]
 struct CameraState {
@@ -72,6 +75,29 @@ struct Coord {
     z: i32,
 }
 
+enum Side {
+    Front,
+    Back,
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Side {
+    fn opposite(&self) -> Self {
+        use Side::*;
+        match self {
+            Front => Back,
+            Back => Front,
+            Left => Right,
+            Right => Left,
+            Top => Bottom,
+            Bottom => Top,
+        }
+    }
+}
+
 enum CircuitNodeType {
     Wire {
         active: Arc<Cell<bool>>,
@@ -85,26 +111,34 @@ struct CircuitNode {
     contents: CircuitNodeType,
 }
 
-struct Game {
-    circuit: circuit::Circuit,
-    block_mesh: Handle<Mesh>,
-    blocks: HashMap<Coord, Entity>,
+impl CircuitNode {
+    fn connect(&self, side: Side, other: &Self, circuit: &mut UsedCircuit) {}
 }
 
-impl FromWorld for Game {
-    fn from_world(world: &mut World) -> Self {
-        let block_mesh = world
-            .resource_mut::<Mut<Assets<Mesh>>>()
-            .add(Mesh::from(shape::Cube { size: 1.0 }));
-        Game {
-            circuit: circuit::Circuit::new(),
-            block_mesh,
-            blocks: HashMap::new(),
-        }
-    }
+struct Game {
+    circuit: UsedCircuit,
+    block_mesh: Handle<Mesh>,
+    blocks: HashMap<Coord, Entity>,
+    last_tick: Duration,
 }
 
 impl Game {
+    fn setup(
+        mut commands: Commands,
+        mut materials: ResMut<Assets<StandardMaterial>>,
+        mut meshes: ResMut<Assets<Mesh>>,
+        time: Res<Time>,
+    ) {
+        let game = Game {
+            circuit: circuit::Circuit::new(),
+            block_mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
+            blocks: HashMap::new(),
+            last_tick: time.time_since_startup(),
+        };
+        Voxels::setup(&game, &mut commands, materials);
+        commands.insert_resource(game);
+    }
+
     fn spawn_block(
         &self,
         commands: &mut Commands,
@@ -128,15 +162,23 @@ impl Game {
             })
             .insert(Collider::cuboid(0.5, 0.5, 0.5));
     }
+
+    fn tick(mut game: ResMut<Game>, time: Res<Time>) {
+        let now = time.time_since_startup();
+        if now - game.last_tick >= Duration::from_secs(1) {
+            // TODO: This better
+            game.circuit.run(1);
+            game.last_tick = now;
+        }
+    }
 }
 
 pub struct Voxels;
 
 impl Voxels {
     fn setup(
-        game: Res<Game>,
-        mut commands: Commands,
-        mut meshes: ResMut<Assets<Mesh>>,
+        game: &Game,
+        commands: &mut Commands,
         mut materials: ResMut<Assets<StandardMaterial>>,
     ) {
         let size = 20;
@@ -146,7 +188,7 @@ impl Voxels {
         for x in 0..size {
             for z in 0..size {
                 game.spawn_block(
-                    &mut commands,
+                    commands,
                     &mut materials,
                     x,
                     0,
@@ -162,7 +204,7 @@ impl Voxels {
 
         let middle_block = Vec3::new(10.0, 1.0, 10.0);
         game.spawn_block(
-            &mut commands,
+            commands,
             &mut materials,
             10,
             1,
@@ -293,8 +335,8 @@ impl Voxels {
 
 impl Plugin for Voxels {
     fn build(&self, app: &mut App) {
-        app.add_startup_system(Voxels::setup)
-            .init_resource::<Game>()
+        app.add_startup_system(Game::setup)
+            .add_system(Game::tick)
             .add_system(Voxels::grab_mouse)
             .add_system(Voxels::cursor_ray)
             .add_system(CameraState::camera_movement);
