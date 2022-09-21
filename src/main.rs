@@ -107,7 +107,7 @@ enum CircuitNodeType {
 }
 
 struct CircuitNode {
-    node_id: circuit::NodeId,
+    node_id: <UsedCircuit as Circuit>::NodeId,
     contents: CircuitNodeType,
 }
 
