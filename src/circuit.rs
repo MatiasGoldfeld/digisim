@@ -1,7 +1,5 @@
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::slice::SliceIndex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type Tick = u64;
 pub type Ticks = u64;
@@ -13,19 +11,26 @@ pub enum RunResult {
 }
 
 pub trait Circuit {
-    type NodeId: Clone + Copy + Eq + Hash;
+    type NodeId: Clone + Copy + Eq + Hash + From<Self::InputId>;
+    type InputId: Clone + Copy + Eq + Hash;
 
     fn new() -> Self;
+    fn tick(&self) -> Tick;
 
     fn update(&mut self);
     fn work_left(&self) -> bool;
 
-    fn wire(&mut self) -> Self::NodeId;
-    fn inverter(&mut self) -> Self::NodeId;
-    fn trigger(&mut self) -> Self::NodeId;
+    fn or(&mut self) -> Self::NodeId;
+    fn nor(&mut self) -> Self::NodeId;
+    fn and(&mut self) -> Self::NodeId;
+    fn nand(&mut self) -> Self::NodeId;
+    fn xor(&mut self) -> Self::NodeId;
+    fn xnor(&mut self) -> Self::NodeId;
+
+    fn input(&mut self) -> Self::InputId;
+    fn set_input(&mut self, node_id: Self::InputId, val: bool);
 
     fn connect(&mut self, input: Self::NodeId, output: Self::NodeId);
-    fn trigger_node(&mut self, node_id: Self::NodeId, val: bool);
 
     fn is_active(&self, node_id: Self::NodeId) -> bool;
 

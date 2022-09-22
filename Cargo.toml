@@ -25,3 +25,7 @@ lto = "thin"
 [[bench]]
 name = "circuit_bench"
 harness = false
+
+[profile.profile]
+inherits = "bench"
+debug = true

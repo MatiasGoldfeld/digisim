@@ -1,13 +1,6 @@
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    fmt::format,
-    ops::DerefMut,
-    sync::{atomic::AtomicBool, Arc},
-    time::Duration,
-};
+use std::{cell::RefCell, ops::DerefMut, sync::Arc, time::Duration};
 
-use criterion::{black_box, criterion_group, criterion_main, Bencher, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, Bencher, Criterion};
 use rand::{RngCore, SeedableRng};
 
 use transist::{
@@ -26,11 +19,15 @@ struct Adder {
 }
 
 fn adder(a: Connector, b: Connector, cin: Connector) -> Adder {
-    let a_xor_b = xor(&a, &b);
-    let a_and_b = and(&a, &b);
-    let a_xor_b_and_cin = and(&a_xor_b, &cin);
-    let sum = xor(&a_xor_b, &cin);
-    let cout = or(&a_and_b, &a_xor_b_and_cin);
+    // let a_xor_b = xor!(a, b);
+    // let a_and_b = and!(a, b);
+    // let a_xor_b_and_cin = and!(a_xor_b, cin);
+    // let sum = xor!(a_xor_b, cin);
+    // let cout = or!(a_and_b, a_xor_b_and_cin);
+    // Adder { sum, cout }
+
+    let sum = xor!(a, b, cin);
+    let cout = or!(and!(a, b), and!(a, cin), and!(b, cin));
     Adder { sum, cout }
 }
 
@@ -47,25 +44,23 @@ fn adder_chain(test: Arc<RefCell<Test>>, n: u8, cin: Connector) {
 }
 
 pub fn bench_rand_inputs(b: &mut Bencher, test: Arc<RefCell<Test>>) {
-    let num_inputs: u8 = test.borrow().inputs.len().try_into().unwrap();
+    let mut borrow = test.borrow_mut();
+    let test = borrow.deref_mut();
+    let num_inputs: u8 = test.inputs.len().try_into().unwrap();
     if num_inputs > 64 {
         panic!("Too many inputs!")
     };
     let mut rng = rand::rngs::StdRng::from_entropy();
     b.iter_batched(
-        || {
-            let input = rng.next_u64();
-            let mut borrow = test.borrow_mut();
-            let test = borrow.deref_mut();
-            for (i, trigger_id) in test.inputs.iter().cloned().enumerate() {
+        move || rng.next_u64(),
+        move |input| {
+            for (i, input_id) in test.inputs.iter().enumerate() {
                 let active = (input & (1 << i)) != 0;
-                test.circuit.trigger_node(trigger_id, active);
+                test.circuit.set_input(*input_id, active);
             }
+            test.circuit.run_until_done();
         },
-        |()| {
-            test.borrow_mut().circuit.run_until_done();
-        },
-        criterion::BatchSize::PerIteration,
+        criterion::BatchSize::SmallInput,
     )
 }
 
@@ -74,6 +69,7 @@ fn adder_bench(c: &mut Criterion, bit_count: u8) {
     let test = Arc::new(RefCell::new(Test::new()));
     adder_chain(test.clone(), bit_count, Connector::new(test.clone()));
     c.bench_function(&name, |b| bench_rand_inputs(b, test.clone()));
+    println!("ticks: {}", test.borrow().circuit.tick());
 }
 
 fn adder_benches(c: &mut Criterion) {

@@ -309,6 +309,10 @@ impl Circuit for CircuitNaive {
         }
     }
 
+    fn tick(&self) -> Tick {
+        self.scheduler.tick
+    }
+
     fn update(&mut self) {
         self.scheduler.update(&self.nodes);
     }

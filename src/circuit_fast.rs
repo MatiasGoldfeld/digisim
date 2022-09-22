@@ -1,12 +1,8 @@
 use std::{
-    collections::{HashMap, HashSet},
     fmt::Debug,
     num::Wrapping,
     ops::{Index, IndexMut},
-    sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 use crate::circuit::*;
@@ -42,7 +38,7 @@ impl NodeIdBuilder {
         node_id
     }
 
-    fn destroy_id(&mut self, node_id: NodeId) {
+    fn _destroy_id(&mut self, node_id: NodeId) {
         self.unused.push(node_id);
     }
 }
@@ -64,21 +60,34 @@ impl<T: Clone + Default> IndexMut<NodeId> for Vec<T> {
     }
 }
 
-enum ValueChange {
-    None,
-    LowToHigh,
-    HighToLow,
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+enum GateType {
+    #[default]
+    OrNor,
+    AndNand,
+    XorXnor,
 }
 
 // #[repr(align(8))]
 #[derive(Clone, Debug, Default)]
 struct NodeData {
-    next_update: NodeId,
-    next_changed: NodeId,
+    next_update: NodeId, // Modified in change, read in update
+    // next_changed: NodeId, // Modified in update, read in change
+
+    // Technically not necessary to store, but perhaps caching it is good?
+    // Read in both phases, modified in change
     output: bool,
-    inputs: Wrapping<u8>,
+    inputs: Wrapping<u8>, // Modified in change
+    // inputs_delta: Wrapping<u8>, // Modified in update, cleared in change
+    inverted: bool,      // Read all over
+    gate_type: GateType, // Read in change
+}
+
+#[derive(Clone, Debug, Default)]
+struct UpdateData {
+    next_changed: NodeId,
     inputs_delta: Wrapping<u8>,
-    inverted: bool,
 }
 
 #[derive(Default, Debug)]
@@ -87,15 +96,12 @@ pub struct CircuitFast {
     node_id_builder: NodeIdBuilder,
     node_children: Vec<Vec<NodeId>>,
     node_data: Vec<NodeData>,
+    node_update_data: Vec<UpdateData>,
     update_head: NodeId,
     changed_head: NodeId,
 }
 
 impl CircuitFast {
-    fn get(&self, node_id: NodeId) -> bool {
-        self.node_data[node_id].output
-    }
-
     fn enqueue_update(&mut self, node_id: NodeId) {
         let node_data = &mut self.node_data[node_id];
         if node_data.next_update == NodeId::NULL {
@@ -105,49 +111,52 @@ impl CircuitFast {
     }
 
     fn mark_changed(&mut self, node_id: NodeId) {
-        let node_data = &mut self.node_data[node_id];
-        if node_data.next_changed == NodeId::NULL {
-            node_data.next_changed = self.changed_head;
+        // let node_data = &mut self.node_data[node_id];
+        let next_changed = &mut self.node_update_data[node_id].next_changed;
+        if *next_changed == NodeId::NULL {
+            *next_changed = self.changed_head;
             self.changed_head = node_id;
         }
     }
 
-    // Only safe to do on node with no inputs
-    fn set(&mut self, node_id: NodeId, val: bool) {
-        self.node_data[node_id].inputs = if val { Wrapping(1) } else { Wrapping(0) };
-        self.mark_changed(node_id); // or enqueue?
-                                    // self.next.insert(node_id);
-    }
-
     // Returns true if value changed
     fn modify(&mut self, node_id: NodeId, increment: bool) {
-        let node_data = &mut self.node_data[node_id];
+        // let node_data = &mut self.node_data[node_id];
+        let inputs_delta = &mut self.node_update_data[node_id].inputs_delta;
         if increment {
-            node_data.inputs_delta += 1;
+            *inputs_delta += 1;
         } else {
-            node_data.inputs_delta -= 1;
+            *inputs_delta -= 1;
         }
         self.mark_changed(node_id);
     }
 
-    fn add_node(&mut self, inverted: bool) -> NodeId {
+    fn add_node(&mut self, gate_type: GateType, inverted: bool) -> NodeId {
         let node_id = self.node_id_builder.get_id();
         let index = node_id.0 as usize;
         if index >= self.node_data.len() {
             self.node_children.resize(index + 1, Vec::new());
             self.node_data.resize(index + 1, NodeData::default());
+            self.node_update_data
+                .resize(index + 1, UpdateData::default());
         }
         self.node_data[index].inverted = inverted;
         self.node_data[index].output = inverted;
+        self.node_data[index].gate_type = gate_type;
         node_id
     }
 }
 
 impl Circuit for CircuitFast {
     type NodeId = NodeId;
+    type InputId = NodeId;
 
     fn new() -> Self {
         Self::default()
+    }
+
+    fn tick(&self) -> Tick {
+        self.tick
     }
 
     fn update(&mut self) {
@@ -158,8 +167,9 @@ impl Circuit for CircuitFast {
             let node_output = node_data.output;
             let next_update = node_data.next_update;
             node_data.next_update = NodeId::NULL;
-            for child in self.node_children[node_id].clone() {
-                self.modify(child, node_output);
+            let danger: *const Self = self; // TODO: Undanger this
+            for child in unsafe { &(*danger).node_children[node_id] } {
+                self.modify(*child, node_output);
             }
             node_id = next_update;
         }
@@ -168,11 +178,17 @@ impl Circuit for CircuitFast {
         self.changed_head = NodeId::NULL;
         while node_id != NodeId::NULL {
             let node_data = &mut self.node_data[node_id];
-            node_data.inputs += node_data.inputs_delta;
-            node_data.inputs_delta = Wrapping(0);
+            let node_update_data = &mut self.node_update_data[node_id];
+            match node_data.gate_type {
+                GateType::OrNor | GateType::AndNand => {
+                    node_data.inputs += node_update_data.inputs_delta
+                }
+                GateType::XorXnor => node_data.inputs ^= node_update_data.inputs_delta.0 & 1,
+            }
+            node_update_data.inputs_delta = Wrapping(0);
             let new_output = node_data.inverted ^ (node_data.inputs.0 != 0);
-            let next_changed = node_data.next_changed;
-            node_data.next_changed = NodeId::NULL;
+            let next_changed = node_update_data.next_changed;
+            node_update_data.next_changed = NodeId::NULL;
             if node_data.output != new_output {
                 node_data.output = new_output;
                 self.enqueue_update(node_id);
@@ -187,30 +203,51 @@ impl Circuit for CircuitFast {
         self.update_head != NodeId::NULL || self.changed_head != NodeId::NULL
     }
 
-    fn wire(&mut self) -> NodeId {
-        self.add_node(false)
+    fn or(&mut self) -> NodeId {
+        self.add_node(GateType::OrNor, false)
     }
 
-    fn inverter(&mut self) -> NodeId {
-        self.add_node(true)
+    fn nor(&mut self) -> NodeId {
+        self.add_node(GateType::OrNor, true)
     }
 
-    fn trigger(&mut self) -> NodeId {
-        self.add_node(false)
+    fn and(&mut self) -> NodeId {
+        self.add_node(GateType::AndNand, true)
+    }
+
+    fn nand(&mut self) -> NodeId {
+        self.add_node(GateType::AndNand, false)
+    }
+
+    fn xor(&mut self) -> NodeId {
+        self.add_node(GateType::XorXnor, false)
+    }
+
+    fn xnor(&mut self) -> NodeId {
+        self.add_node(GateType::XorXnor, true)
+    }
+
+    fn input(&mut self) -> NodeId {
+        self.add_node(GateType::OrNor, false)
+    }
+
+    fn set_input(&mut self, node_id: NodeId, val: bool) {
+        self.node_data[node_id].inputs = if val { Wrapping(1) } else { Wrapping(0) };
+        self.mark_changed(node_id); // or enqueue?
     }
 
     fn connect(&mut self, input: NodeId, output: NodeId) {
         self.node_children[input].push(output);
-        if self.get(input) {
-            self.modify(output, true);
+        let is_and_nand = match self.node_data[output].gate_type {
+            GateType::OrNor | GateType::XorXnor => false,
+            GateType::AndNand => true,
+        };
+        if self.is_active(input) ^ is_and_nand {
+            self.modify(output, !is_and_nand);
         }
     }
 
-    fn trigger_node(&mut self, node_id: NodeId, val: bool) {
-        self.set(node_id, val);
-    }
-
     fn is_active(&self, node_id: NodeId) -> bool {
-        self.get(node_id)
+        self.node_data[node_id].output
     }
 }

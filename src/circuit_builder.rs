@@ -5,7 +5,7 @@ use crate::circuit::*;
 pub struct Test<C: Circuit> {
     pub circuit: C,
     marked: HashMap<String, C::NodeId>,
-    pub inputs: Vec<C::NodeId>,
+    pub inputs: Vec<C::InputId>,
 }
 
 impl<C: Circuit> Test<C> {
@@ -17,8 +17,8 @@ impl<C: Circuit> Test<C> {
         }
     }
 
-    fn add_input(&mut self, trigger_id: C::NodeId) {
-        self.inputs.push(trigger_id);
+    fn add_input(&mut self, input_id: C::InputId) {
+        self.inputs.push(input_id);
     }
 
     fn mark_wire(&mut self, name: String, node_id: C::NodeId) {
@@ -61,7 +61,7 @@ impl<C: Circuit> Test<C> {
             // println!("Running input '{input}'");
             for (i, trigger_id) in self.inputs.iter().cloned().enumerate() {
                 let active = (input & (1 << i)) != 0;
-                self.circuit.trigger_node(trigger_id, active);
+                self.circuit.set_input(trigger_id, active);
             }
             match self.circuit.run(max_ticks - ticks) {
                 RunResult::Finished { after_ticks } => ticks += after_ticks,
@@ -88,19 +88,19 @@ impl<C: Circuit> Connector<C> {
     }
 
     pub fn new(test: Arc<RefCell<Test<C>>>) -> Self {
-        let output = test.borrow_mut().circuit.wire();
+        let output = test.borrow_mut().circuit.or();
         Self::from_output(test, output)
     }
 
-    fn or<'a>(connectors: Vec<&'a Self>) -> Self {
-        let test = connectors[0].test.clone();
+    fn gate_gen<'a>(f: fn(&mut C) -> C::NodeId, inputs: Vec<&'a Self>) -> Self {
+        let test = inputs[0].test.clone();
         let circuit = &mut test.borrow_mut().circuit;
-        let wire = circuit.wire();
-        for connector in connectors {
-            assert!(Arc::ptr_eq(&test, &connector.test));
-            circuit.connect(connector.output, wire);
+        let output = f(circuit);
+        for input in inputs {
+            assert!(Arc::ptr_eq(&test, &input.test));
+            circuit.connect(input.output, output);
         }
-        Self::from_output(test.clone(), wire)
+        Self::from_output(test.clone(), output)
     }
 
     pub fn mark(&self, name: String) -> &Self {
@@ -110,24 +110,20 @@ impl<C: Circuit> Connector<C> {
 
     pub fn invert(&self) -> Self {
         let circuit = &mut self.test.borrow_mut().circuit;
-        let inverter = circuit.inverter();
-        let wire = circuit.wire();
+        let inverter = circuit.nor();
         circuit.connect(self.output, inverter);
-        circuit.connect(inverter, wire);
-        Self::from_output(self.test.clone(), wire)
+        Self::from_output(self.test.clone(), inverter)
     }
 
-    pub fn trigger(test: Arc<RefCell<Test<C>>>) -> (Self, C::NodeId) {
+    pub fn trigger(test: Arc<RefCell<Test<C>>>) -> (Self, C::InputId) {
         let circuit = &mut test.borrow_mut().circuit;
-        let trigger = circuit.trigger();
-        let wire = circuit.wire();
-        circuit.connect(trigger, wire);
-        (Self::from_output(test.clone(), wire), trigger)
+        let trigger = circuit.input();
+        (Self::from_output(test.clone(), trigger.into()), trigger)
     }
 
     pub fn input(test: Arc<RefCell<Test<C>>>) -> Self {
-        let (connector, trigger) = Self::trigger(test.clone());
-        test.borrow_mut().add_input(trigger);
+        let (connector, input_id) = Self::trigger(test.clone());
+        test.borrow_mut().add_input(input_id);
         connector
     }
 
@@ -141,23 +137,71 @@ pub mod ops {
 
     use super::Connector;
 
-    pub fn or<C: Circuit>(a: &Connector<C>, b: &Connector<C>) -> Connector<C> {
-        Connector::or(vec![a, b])
+    pub use crate::{and, nand, nor, or, xor, xnor};
+
+    pub fn or<C: Circuit>(inputs: Vec<&Connector<C>>) -> Connector<C> {
+        Connector::gate_gen(C::or, inputs)
     }
 
-    pub fn nor<C: Circuit>(a: &Connector<C>, b: &Connector<C>) -> Connector<C> {
-        or(a, b).invert()
+    pub fn nor<C: Circuit>(inputs: Vec<&Connector<C>>) -> Connector<C> {
+        Connector::gate_gen(C::nor, inputs)
     }
 
-    pub fn nand<C: Circuit>(a: &Connector<C>, b: &Connector<C>) -> Connector<C> {
-        or(&a.invert(), &b.invert())
+    pub fn and<C: Circuit>(inputs: Vec<&Connector<C>>) -> Connector<C> {
+        Connector::gate_gen(C::and, inputs)
     }
 
-    pub fn and<C: Circuit>(a: &Connector<C>, b: &Connector<C>) -> Connector<C> {
-        nand(a, b).invert()
+    pub fn nand<C: Circuit>(inputs: Vec<&Connector<C>>) -> Connector<C> {
+        Connector::gate_gen(C::nand, inputs)
     }
 
-    pub fn xor<C: Circuit>(a: &Connector<C>, b: &Connector<C>) -> Connector<C> {
-        nor(&and(&a, &b), &nor(&a, &b))
+    pub fn xor<C: Circuit>(inputs: Vec<&Connector<C>>) -> Connector<C> {
+        Connector::gate_gen(C::xor, inputs)
+    }
+
+    pub fn xnor<C: Circuit>(inputs: Vec<&Connector<C>>) -> Connector<C> {
+        Connector::gate_gen(C::xnor, inputs)
+    }
+
+    #[macro_export]
+    macro_rules! or {
+        ( $( $inputs:expr ),+ ) => {
+            or(vec!($(&$inputs),+))
+        };
+    }
+
+    #[macro_export]
+    macro_rules! nor {
+        ( $( $inputs:expr ),+ ) => {
+            nor(vec!($(&$inputs),+))
+        };
+    }
+
+    #[macro_export]
+    macro_rules! and {
+        ( $( $inputs:expr ),+ ) => {
+            and(vec!($(&$inputs),+))
+        };
+    }
+
+    #[macro_export]
+    macro_rules! nand {
+        ( $( $inputs:expr ),+ ) => {
+            nand(vec!($(&$inputs),+))
+        };
+    }
+
+    #[macro_export]
+    macro_rules! xor {
+        ( $( $inputs:expr ),+ ) => {
+            xor(vec!($(&$inputs),+))
+        };
+    }
+
+    #[macro_export]
+    macro_rules! xnor {
+        ( $( $inputs:expr ),+ ) => {
+            xnor(vec!($(&$inputs),+))
+        };
     }
 }
