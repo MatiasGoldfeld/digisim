@@ -1,14 +1,17 @@
+[workspace]
+
+members = [
+    "game",
+]
+
 [package]
-name = "transist"
+name = "digisim"
 version = "0.1.0"
 edition = "2021"
-autobins = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = "0.8.1"
-bevy_rapier3d = "0.16.2"
 criterion = "0.4.0"
 rand = "0.8.5"
 

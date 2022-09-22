@@ -3,7 +3,7 @@ use std::{cell::RefCell, ops::DerefMut, sync::Arc, time::Duration};
 use criterion::{criterion_group, criterion_main, Bencher, Criterion};
 use rand::{RngCore, SeedableRng};
 
-use transist::{
+use digisim::{
     circuit::*,
     circuit_builder::{self, ops::*},
     // circuit_fast::CircuitFast as UsedCircuit,
@@ -19,13 +19,6 @@ struct Adder {
 }
 
 fn adder(a: Connector, b: Connector, cin: Connector) -> Adder {
-    // let a_xor_b = xor!(a, b);
-    // let a_and_b = and!(a, b);
-    // let a_xor_b_and_cin = and!(a_xor_b, cin);
-    // let sum = xor!(a_xor_b, cin);
-    // let cout = or!(a_and_b, a_xor_b_and_cin);
-    // Adder { sum, cout }
-
     let sum = xor!(a, b, cin);
     let cout = or!(and!(a, b), and!(a, cin), and!(b, cin));
     Adder { sum, cout }

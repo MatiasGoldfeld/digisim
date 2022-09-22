@@ -3,12 +3,12 @@ use std::{cell::Cell, sync::Arc};
 use bevy::{
     input::mouse::MouseMotion,
     prelude::*,
-    utils::{Duration, HashMap, HashSet},
+    utils::{Duration, HashMap},
 };
 use bevy_rapier3d::prelude::*;
-use transist::{
+use digisim::{
     circuit::{self, Circuit},
-    circuit_naive::CircuitNaive as UsedCircuit,
+    circuit_fast::CircuitFast as UsedCircuit,
 };
 
 #[derive(Default)]

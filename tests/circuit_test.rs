@@ -2,7 +2,7 @@
 mod test {
     use std::{cell::RefCell, sync::Arc};
 
-    use transist::{
+    use digisim::{
         circuit::*,
         circuit_builder::{self, ops::*},
         circuit_fast::CircuitFast as UsedCircuit,
