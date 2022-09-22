@@ -75,6 +75,7 @@ fn adder_bench(c: &mut Criterion, bit_count: u8) {
 fn adder_benches(c: &mut Criterion) {
     adder_bench(c, 8);
     adder_bench(c, 16);
+    adder_bench(c, 32);
 }
 
 criterion_group! {
