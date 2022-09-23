@@ -4,14 +4,13 @@ use criterion::{criterion_group, criterion_main, Bencher, Criterion};
 use rand::{RngCore, SeedableRng};
 
 use digisim::{
-    circuit::*,
+    circuit::Circuit,
     circuit_builder::{self, ops::*},
-    // circuit_fast::CircuitFast as UsedCircuit,
-    circuit_fast::CircuitFast as UsedCircuit,
+    circuit_sim::*,
 };
 
-type Test = circuit_builder::Test<UsedCircuit>;
-type Connector = circuit_builder::Connector<UsedCircuit>;
+type Test = circuit_builder::Test<Circuit>;
+type Connector = circuit_builder::Connector<Circuit>;
 
 struct Adder {
     sum: Connector,

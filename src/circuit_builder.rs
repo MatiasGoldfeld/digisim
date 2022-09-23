@@ -1,17 +1,17 @@
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
-use crate::circuit::*;
+use crate::circuit_sim::*;
 
-pub struct Test<C: Circuit> {
+pub struct Test<C: CircuitSim> {
     pub circuit: C,
     marked: HashMap<String, C::NodeId>,
     pub inputs: Vec<C::InputId>,
 }
 
-impl<C: Circuit> Test<C> {
+impl<C: CircuitSim> Test<C> {
     pub fn new() -> Self {
         Test {
-            circuit: Circuit::new(),
+            circuit: C::new(),
             marked: HashMap::new(),
             inputs: Vec::new(),
         }
@@ -28,7 +28,7 @@ impl<C: Circuit> Test<C> {
     pub fn print_marked(&self) {
         println!("Printing marked wires:");
         for (name, node_id) in self.marked.iter() {
-            println!("{name}: {}", self.circuit.is_active(*node_id));
+            println!("{name}: {}", self.circuit.get_output(*node_id));
         }
     }
 
@@ -77,12 +77,12 @@ impl<C: Circuit> Test<C> {
     }
 }
 
-pub struct Connector<C: Circuit> {
+pub struct Connector<C: CircuitSim> {
     test: Arc<RefCell<Test<C>>>,
     output: C::NodeId,
 }
 
-impl<C: Circuit> Connector<C> {
+impl<C: CircuitSim> Connector<C> {
     fn from_output(test: Arc<RefCell<Test<C>>>, output: C::NodeId) -> Self {
         Connector { test, output }
     }
@@ -128,38 +128,38 @@ impl<C: Circuit> Connector<C> {
     }
 
     pub fn is_active(&self) -> bool {
-        self.test.borrow().circuit.is_active(self.output)
+        self.test.borrow().circuit.get_output(self.output)
     }
 }
 
 pub mod ops {
-    use crate::circuit::Circuit;
+    use crate::circuit_sim::CircuitSim;
 
     use super::Connector;
 
-    pub use crate::{and, nand, nor, or, xor, xnor};
+    pub use crate::{and, nand, nor, or, xnor, xor};
 
-    pub fn or<C: Circuit>(inputs: Vec<&Connector<C>>) -> Connector<C> {
+    pub fn or<C: CircuitSim>(inputs: Vec<&Connector<C>>) -> Connector<C> {
         Connector::gate_gen(C::or, inputs)
     }
 
-    pub fn nor<C: Circuit>(inputs: Vec<&Connector<C>>) -> Connector<C> {
+    pub fn nor<C: CircuitSim>(inputs: Vec<&Connector<C>>) -> Connector<C> {
         Connector::gate_gen(C::nor, inputs)
     }
 
-    pub fn and<C: Circuit>(inputs: Vec<&Connector<C>>) -> Connector<C> {
+    pub fn and<C: CircuitSim>(inputs: Vec<&Connector<C>>) -> Connector<C> {
         Connector::gate_gen(C::and, inputs)
     }
 
-    pub fn nand<C: Circuit>(inputs: Vec<&Connector<C>>) -> Connector<C> {
+    pub fn nand<C: CircuitSim>(inputs: Vec<&Connector<C>>) -> Connector<C> {
         Connector::gate_gen(C::nand, inputs)
     }
 
-    pub fn xor<C: Circuit>(inputs: Vec<&Connector<C>>) -> Connector<C> {
+    pub fn xor<C: CircuitSim>(inputs: Vec<&Connector<C>>) -> Connector<C> {
         Connector::gate_gen(C::xor, inputs)
     }
 
-    pub fn xnor<C: Circuit>(inputs: Vec<&Connector<C>>) -> Connector<C> {
+    pub fn xnor<C: CircuitSim>(inputs: Vec<&Connector<C>>) -> Connector<C> {
         Connector::gate_gen(C::xnor, inputs)
     }
 

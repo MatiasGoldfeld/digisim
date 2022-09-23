@@ -8,7 +8,7 @@ use bevy::{
 use bevy_rapier3d::prelude::*;
 use digisim::{
     circuit::{self, Circuit},
-    circuit_fast::CircuitFast as UsedCircuit,
+    circuit_sim::CircuitSim,
 };
 
 #[derive(Default)]
@@ -107,16 +107,16 @@ enum CircuitNodeType {
 }
 
 struct CircuitNode {
-    node_id: <UsedCircuit as Circuit>::NodeId,
+    node_id: circuit::NodeId,
     contents: CircuitNodeType,
 }
 
 impl CircuitNode {
-    fn connect(&self, side: Side, other: &Self, circuit: &mut UsedCircuit) {}
+    fn connect(&self, side: Side, other: &Self, circuit: &mut Circuit) {}
 }
 
 struct Game {
-    circuit: UsedCircuit,
+    circuit: Circuit,
     block_mesh: Handle<Mesh>,
     blocks: HashMap<Coord, Entity>,
     last_tick: Duration,
@@ -130,7 +130,7 @@ impl Game {
         time: Res<Time>,
     ) {
         let game = Game {
-            circuit: circuit::Circuit::new(),
+            circuit: Circuit::new(),
             block_mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
             blocks: HashMap::new(),
             last_tick: time.time_since_startup(),
