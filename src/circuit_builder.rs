@@ -1,167 +1,135 @@
-use std::{cell::RefCell, collections::HashMap, sync::Arc};
+use std::{cell::RefCell, sync::Arc};
 
 use crate::circuit_sim::*;
+use crate::{Circuit, InputId, NodeId};
 
-pub struct Test<C: CircuitSim> {
-    pub circuit: C,
-    marked: HashMap<String, C::NodeId>,
-    pub inputs: Vec<C::InputId>,
+pub trait BuilderHooks: Default {
+    fn create_node_hook(&mut self, _node_id: NodeId) {}
+    fn create_input_hook(&mut self, _input_id: InputId) {}
+    fn connect_hook(&mut self, _input: NodeId, _output: NodeId) {}
+
+    type MarkNodeArgs;
+    fn mark_node(&mut self, _node_id: NodeId, _args: Self::MarkNodeArgs) {}
 }
 
-impl<C: CircuitSim> Test<C> {
-    pub fn new() -> Self {
-        Test {
-            circuit: C::new(),
-            marked: HashMap::new(),
-            inputs: Vec::new(),
-        }
+#[derive(Default)]
+pub struct NoHooks;
+impl BuilderHooks for NoHooks {
+    type MarkNodeArgs = ();
+}
+
+pub type CircuitBuilder = CircuitBuilderWithHooks<NoHooks>;
+
+#[derive(Default)]
+pub struct CircuitBuilderWithHooks<T: BuilderHooks> {
+    circuit: Circuit,
+    hooks: T,
+}
+
+impl<T: BuilderHooks> CircuitBuilderWithHooks<T> {
+    fn create_node(&mut self, node_type: NodeType) -> NodeId {
+        let node_id = self.circuit.create_node(node_type);
+        self.hooks.create_node_hook(node_id);
+        node_id
     }
 
-    fn add_input(&mut self, input_id: C::InputId) {
-        self.inputs.push(input_id);
+    fn create_input(&mut self) -> InputId {
+        let input_id = self.circuit.create_input();
+        self.hooks.create_node_hook(input_id);
+        self.hooks.create_input_hook(input_id);
+        input_id
     }
 
-    fn mark_wire(&mut self, name: String, node_id: C::NodeId) {
-        self.marked.insert(name, node_id);
+    fn connect(&mut self, input: NodeId, output: NodeId) {
+        self.circuit.connect(input, output);
+        self.hooks.connect_hook(input, output);
     }
 
-    pub fn print_marked(&self) {
-        println!("Printing marked wires:");
-        for (name, node_id) in self.marked.iter() {
-            println!("{name}: {}", self.circuit.get_output(*node_id));
-        }
+    fn mark_node(&mut self, node_id: NodeId, args: T::MarkNodeArgs) {
+        self.hooks.mark_node(node_id, args);
     }
 
-    pub fn run(&mut self, max_ticks: Ticks, debug: bool) -> RunResult {
-        for ticks in 0..(max_ticks + 1) {
-            if debug {
-                self.print_marked()
-            };
-            match self.circuit.run(1) {
-                RunResult::Finished { after_ticks: _ } => {
-                    return RunResult::Finished { after_ticks: ticks }
-                }
-
-                RunResult::ReachedMaxTicks { max_ticks: _ } => (),
-            }
-        }
-        if debug {
-            self.print_marked()
-        };
-        return RunResult::ReachedMaxTicks { max_ticks };
-    }
-
-    pub fn run_all_inputs(&mut self, max_ticks: Ticks) -> RunResult {
-        let num_inputs: u8 = self.inputs.len().try_into().unwrap();
-        let mut input: u32 = 0;
-        let max_input: u32 = 1 << num_inputs;
-        let mut ticks: Tick = 0;
-        // println!("Running all {num_inputs} inputs in {max_input} tests...");
-        while input < max_input {
-            // println!("Running input '{input}'");
-            for (i, trigger_id) in self.inputs.iter().cloned().enumerate() {
-                let active = (input & (1 << i)) != 0;
-                self.circuit.set_input(trigger_id, active);
-            }
-            match self.circuit.run(max_ticks - ticks) {
-                RunResult::Finished { after_ticks } => ticks += after_ticks,
-                RunResult::ReachedMaxTicks { max_ticks: _ } => {
-                    return RunResult::ReachedMaxTicks { max_ticks }
-                }
-            }
-            // println!("Results:");
-            // self.print_marked();
-            input += 1;
-        }
-        RunResult::Finished { after_ticks: ticks }
+    pub fn build(&mut self) -> (&mut Circuit, &mut T) {
+        (&mut self.circuit, &mut self.hooks)
     }
 }
 
-pub struct Connector<C: CircuitSim> {
-    test: Arc<RefCell<Test<C>>>,
-    output: C::NodeId,
+pub struct Connector<T: BuilderHooks> {
+    builder: Arc<RefCell<CircuitBuilderWithHooks<T>>>,
+    pub output: NodeId,
 }
 
-impl<C: CircuitSim> Connector<C> {
-    fn from_output(test: Arc<RefCell<Test<C>>>, output: C::NodeId) -> Self {
-        Connector { test, output }
+impl<T: BuilderHooks> Connector<T> {
+    fn from_output(builder: Arc<RefCell<CircuitBuilderWithHooks<T>>>, output: NodeId) -> Self {
+        Connector { builder, output }
     }
 
-    pub fn new(test: Arc<RefCell<Test<C>>>) -> Self {
-        let output = test.borrow_mut().circuit.or();
-        Self::from_output(test, output)
+    pub fn new(builder: Arc<RefCell<CircuitBuilderWithHooks<T>>>) -> Self {
+        let output = builder.borrow_mut().create_node(NodeType::Or);
+        Self::from_output(builder.clone(), output)
     }
 
-    fn gate_gen<'a>(f: fn(&mut C) -> C::NodeId, inputs: Vec<&'a Self>) -> Self {
-        let test = inputs[0].test.clone();
-        let circuit = &mut test.borrow_mut().circuit;
-        let output = f(circuit);
+    fn gate_gen<'a>(node_type: NodeType, inputs: &[&'a Self]) -> Self {
+        let builder = inputs[0].builder.clone();
+        let mut builder_mut = builder.borrow_mut();
+        let output = builder_mut.create_node(node_type);
         for input in inputs {
-            assert!(Arc::ptr_eq(&test, &input.test));
-            circuit.connect(input.output, output);
+            assert!(Arc::ptr_eq(&builder, &input.builder));
+            let input = input.output;
+            builder_mut.connect(input, output);
         }
-        Self::from_output(test.clone(), output)
+        Self::from_output(builder.clone(), output)
     }
 
-    pub fn mark(&self, name: String) -> &Self {
-        self.test.borrow_mut().mark_wire(name, self.output);
+    pub fn mark(&self, args: T::MarkNodeArgs) -> &Self {
+        self.builder.borrow_mut().mark_node(self.output, args);
         self
     }
 
     pub fn invert(&self) -> Self {
-        let circuit = &mut self.test.borrow_mut().circuit;
-        let inverter = circuit.nor();
-        circuit.connect(self.output, inverter);
-        Self::from_output(self.test.clone(), inverter)
+        let mut builder_mut = self.builder.borrow_mut();
+        let inverter = builder_mut.create_node(NodeType::Nor);
+        builder_mut.connect(self.output, inverter);
+        Self::from_output(self.builder.clone(), inverter)
     }
 
-    pub fn trigger(test: Arc<RefCell<Test<C>>>) -> (Self, C::InputId) {
-        let circuit = &mut test.borrow_mut().circuit;
-        let trigger = circuit.input();
-        (Self::from_output(test.clone(), trigger.into()), trigger)
+    pub fn input(builder: Arc<RefCell<CircuitBuilderWithHooks<T>>>) -> (Self, InputId) {
+        let mut builder_mut = builder.borrow_mut();
+        let input_id = builder_mut.create_input();
+        (Self::from_output(builder.clone(), input_id), input_id)
     }
 
-    pub fn input(test: Arc<RefCell<Test<C>>>) -> Self {
-        let (connector, input_id) = Self::trigger(test.clone());
-        test.borrow_mut().add_input(input_id);
+    pub fn input_ignore(builder: Arc<RefCell<CircuitBuilderWithHooks<T>>>) -> Self {
+        let (connector, _input_id) = Self::input(builder);
         connector
     }
 
-    pub fn is_active(&self) -> bool {
-        self.test.borrow().circuit.get_output(self.output)
+    pub fn get_output(&self) -> bool {
+        self.builder.borrow().circuit.get_output(self.output)
     }
 }
 
 pub mod ops {
-    use crate::circuit_sim::CircuitSim;
+    use crate::circuit_sim::NodeType;
 
-    use super::Connector;
+    use super::{BuilderHooks, Connector};
 
     pub use crate::{and, nand, nor, or, xnor, xor};
 
-    pub fn or<C: CircuitSim>(inputs: Vec<&Connector<C>>) -> Connector<C> {
-        Connector::gate_gen(C::or, inputs)
+    macro_rules! gate_fn_gen {
+        ( $gate_lowercase:ident, $gate_uppercase:ident ) => {
+            pub fn $gate_lowercase<T: BuilderHooks>(inputs: Vec<&Connector<T>>) -> Connector<T> {
+                Connector::gate_gen(NodeType::$gate_uppercase, &inputs)
+            }
+        };
     }
 
-    pub fn nor<C: CircuitSim>(inputs: Vec<&Connector<C>>) -> Connector<C> {
-        Connector::gate_gen(C::nor, inputs)
-    }
-
-    pub fn and<C: CircuitSim>(inputs: Vec<&Connector<C>>) -> Connector<C> {
-        Connector::gate_gen(C::and, inputs)
-    }
-
-    pub fn nand<C: CircuitSim>(inputs: Vec<&Connector<C>>) -> Connector<C> {
-        Connector::gate_gen(C::nand, inputs)
-    }
-
-    pub fn xor<C: CircuitSim>(inputs: Vec<&Connector<C>>) -> Connector<C> {
-        Connector::gate_gen(C::xor, inputs)
-    }
-
-    pub fn xnor<C: CircuitSim>(inputs: Vec<&Connector<C>>) -> Connector<C> {
-        Connector::gate_gen(C::xnor, inputs)
-    }
+    gate_fn_gen!(or, Or);
+    gate_fn_gen!(nor, Nor);
+    gate_fn_gen!(and, And);
+    gate_fn_gen!(nand, Nand);
+    gate_fn_gen!(xor, Xor);
+    gate_fn_gen!(xnor, Xnor);
 
     #[macro_export]
     macro_rules! or {

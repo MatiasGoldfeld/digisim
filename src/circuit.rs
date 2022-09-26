@@ -219,32 +219,19 @@ impl CircuitSim for Circuit {
         self.update_head != NodeId::NULL || self.changed_head != NodeId::NULL
     }
 
-    fn or(&mut self) -> NodeId {
-        self.add_node(GateType::OrNor, false)
+    fn create_node(&mut self, node_type: NodeType) -> Self::NodeId {
+        match node_type {
+            NodeType::Or => self.add_node(GateType::OrNor, false),
+            NodeType::Nor => self.add_node(GateType::OrNor, true),
+            NodeType::And => self.add_node(GateType::AndNand, true),
+            NodeType::Nand => self.add_node(GateType::AndNand, false),
+            NodeType::Xor => self.add_node(GateType::XorXnor, false),
+            NodeType::Xnor => self.add_node(GateType::XorXnor, true),
+        }
     }
 
-    fn nor(&mut self) -> NodeId {
-        self.add_node(GateType::OrNor, true)
-    }
-
-    fn and(&mut self) -> NodeId {
-        self.add_node(GateType::AndNand, true)
-    }
-
-    fn nand(&mut self) -> NodeId {
-        self.add_node(GateType::AndNand, false)
-    }
-
-    fn xor(&mut self) -> NodeId {
-        self.add_node(GateType::XorXnor, false)
-    }
-
-    fn xnor(&mut self) -> NodeId {
-        self.add_node(GateType::XorXnor, true)
-    }
-
-    fn input(&mut self) -> NodeId {
-        self.add_node(GateType::OrNor, false)
+    fn create_input(&mut self) -> Self::InputId {
+        self.create_node(NodeType::Or)
     }
 
     fn set_input(&mut self, node_id: NodeId, val: bool) {

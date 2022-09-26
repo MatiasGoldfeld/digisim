@@ -1,51 +1,76 @@
 #[cfg(test)]
 mod test {
-    use std::{cell::RefCell, sync::Arc};
+    use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 
     use digisim::{
-        circuit::Circuit,
-        circuit_builder::{self, ops::*},
+        circuit_builder::{
+            ops::*, BuilderHooks, CircuitBuilder, CircuitBuilderWithHooks, Connector, NoHooks,
+        },
         circuit_sim::*,
+        Circuit, NodeId,
     };
 
-    type Test = circuit_builder::Test<Circuit>;
-    type Connector = circuit_builder::Connector<Circuit>;
+    #[derive(Default, Debug)]
+    struct Marks {
+        marks: BTreeMap<String, NodeId>,
+    }
+
+    impl Marks {
+        fn print(&self, circuit: &Circuit) {
+            for (name, node_id) in self.marks.iter().by_ref() {
+                println!("{}: {}", name, circuit.get_output(*node_id));
+            }
+        }
+    }
+
+    impl BuilderHooks for Marks {
+        type MarkNodeArgs = String;
+
+        fn mark_node(&mut self, node_id: NodeId, name: String) {
+            self.marks.insert(name, node_id);
+        }
+    }
 
     #[test]
     fn inverter_series_test() {
-        let test = Arc::new(RefCell::new(Test::new()));
-        Connector::new(test.clone())
+        let builder = Arc::new(RefCell::new(CircuitBuilderWithHooks::<Marks>::default()));
+        Connector::new(builder.clone())
             .invert()
-            .mark("post-first".to_string())
+            .mark("1-output".to_string())
             .invert()
-            .mark("post-second".to_string())
+            .mark("2-output".to_string())
             .invert()
-            .mark("post-third".to_string())
+            .mark("3-output".to_string())
             .invert()
-            .mark("post-forth".to_string())
+            .mark("4-output".to_string())
             .invert()
-            .mark("post-fifth".to_string());
-        let ticks = test.borrow_mut().run(100, false);
+            .mark("5-output".to_string());
+        let mut borrow = builder.borrow_mut();
+        let (circuit, marks) = borrow.build();
+        let ticks = circuit.run(100);
         println!("{:?}", ticks);
-        println!("{:?}", test.borrow().print_marked());
+        marks.print(&circuit);
     }
 
-    fn gate_test_gen(name: &str, f: fn(Vec<&Connector>) -> Connector, expecteds: [bool; 4]) {
-        let test = Arc::new(RefCell::new(Test::new()));
-        let (a, input_a) = Connector::trigger(test.clone());
-        let (b, input_b) = Connector::trigger(test.clone());
+    fn gate_test_gen(
+        name: &str,
+        f: fn(Vec<&Connector<NoHooks>>) -> Connector<NoHooks>,
+        expecteds: [bool; 4],
+    ) {
+        let builder = Arc::new(RefCell::new(CircuitBuilder::default()));
+        let (a, input_a) = Connector::input(builder.clone());
+        let (b, input_b) = Connector::input(builder.clone());
         let out = f(vec![&a, &b]);
+        let mut borrow = builder.borrow_mut();
+        let (circuit, _) = borrow.build();
         let expecteds = [(false, false), (false, true), (true, false), (true, true)]
             .into_iter()
             .zip(expecteds.into_iter());
         for ((in_a, in_b), expected) in expecteds {
-            {
-                let mut test = test.borrow_mut();
-                test.circuit.set_input(input_a, in_a);
-                test.circuit.set_input(input_b, in_b);
-                test.run(100, false);
-            }
-            let result = out.is_active();
+            circuit.set_input(input_a, in_a);
+            circuit.set_input(input_b, in_b);
+            circuit.run(100);
+            let result = circuit.get_output(out.output);
             assert_eq!(result, expected, "{in_a} {name} {in_b} = {expected}");
         }
     }

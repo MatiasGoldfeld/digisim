@@ -4,6 +4,15 @@ use std::hash::Hash;
 pub type Tick = u64;
 pub type Ticks = u64;
 
+pub enum NodeType {
+    Or,
+    Nor,
+    And,
+    Nand,
+    Xor,
+    Xnor,
+}
+
 #[derive(Debug)]
 pub enum RunResult {
     Finished { after_ticks: Ticks },
@@ -23,14 +32,9 @@ pub trait CircuitSim {
     fn update(&mut self);
     fn connect(&mut self, input: Self::NodeId, output: Self::NodeId);
 
-    fn or(&mut self) -> Self::NodeId;
-    fn nor(&mut self) -> Self::NodeId;
-    fn and(&mut self) -> Self::NodeId;
-    fn nand(&mut self) -> Self::NodeId;
-    fn xor(&mut self) -> Self::NodeId;
-    fn xnor(&mut self) -> Self::NodeId;
+    fn create_node(&mut self, node_type: NodeType) -> Self::NodeId;
+    fn create_input(&mut self) -> Self::InputId;
 
-    fn input(&mut self) -> Self::InputId;
     fn set_input(&mut self, node_id: Self::InputId, val: bool);
 
     fn run(&mut self, max_ticks: Ticks) -> RunResult {
@@ -43,6 +47,7 @@ pub trait CircuitSim {
         }
         RunResult::ReachedMaxTicks { max_ticks }
     }
+
     fn run_until_done(&mut self) {
         while self.work_left() {
             self.update();
