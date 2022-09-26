@@ -22,7 +22,7 @@ pub type CircuitBuilder = CircuitBuilderWithHooks<NoHooks>;
 
 #[derive(Default)]
 pub struct CircuitBuilderWithHooks<T: BuilderHooks> {
-    circuit: Circuit,
+    pub circuit: Circuit,
     hooks: T,
 }
 
@@ -69,6 +69,17 @@ impl<T: BuilderHooks> Connector<T> {
         Self::from_output(builder.clone(), output)
     }
 
+    pub fn input(builder: Arc<RefCell<CircuitBuilderWithHooks<T>>>) -> (Self, InputId) {
+        let mut builder_mut = builder.borrow_mut();
+        let input_id = builder_mut.create_input();
+        (Self::from_output(builder.clone(), input_id), input_id)
+    }
+
+    pub fn input_ignore(builder: Arc<RefCell<CircuitBuilderWithHooks<T>>>) -> Self {
+        let (connector, _input_id) = Self::input(builder);
+        connector
+    }
+
     fn gate_gen<'a>(node_type: NodeType, inputs: &[&'a Self]) -> Self {
         let builder = inputs[0].builder.clone();
         let mut builder_mut = builder.borrow_mut();
@@ -93,15 +104,10 @@ impl<T: BuilderHooks> Connector<T> {
         Self::from_output(self.builder.clone(), inverter)
     }
 
-    pub fn input(builder: Arc<RefCell<CircuitBuilderWithHooks<T>>>) -> (Self, InputId) {
-        let mut builder_mut = builder.borrow_mut();
-        let input_id = builder_mut.create_input();
-        (Self::from_output(builder.clone(), input_id), input_id)
-    }
-
-    pub fn input_ignore(builder: Arc<RefCell<CircuitBuilderWithHooks<T>>>) -> Self {
-        let (connector, _input_id) = Self::input(builder);
-        connector
+    pub fn connect(&self, output: &Connector<T>) {
+        self.builder
+            .borrow_mut()
+            .connect(self.output, output.output);
     }
 
     pub fn get_output(&self) -> bool {
