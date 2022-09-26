@@ -6,10 +6,7 @@ use bevy::{
     utils::{Duration, HashMap},
 };
 use bevy_rapier3d::prelude::*;
-use digisim::{
-    circuit::{self, Circuit},
-    circuit_sim::CircuitSim,
-};
+use digisim::{circuit_sim::CircuitSim, Circuit};
 
 #[derive(Default)]
 struct CameraState {
@@ -107,7 +104,7 @@ enum CircuitNodeType {
 }
 
 struct CircuitNode {
-    node_id: circuit::NodeId,
+    node_id: digisim::NodeId,
     contents: CircuitNodeType,
 }
 

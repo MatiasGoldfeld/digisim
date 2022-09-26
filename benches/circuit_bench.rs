@@ -4,10 +4,9 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use rand::{RngCore, SeedableRng};
 
 use digisim::{
-    circuit_builder::{self, ops::*, CircuitBuilder, NoHooks},
+    circuit_builder::{self, CircuitBuilder, NoHooks},
     circuit_sim::*,
     components::adder::RippleCarryAdder,
-    InputId, NodeId,
 };
 
 type Connector = circuit_builder::Connector<NoHooks>;
