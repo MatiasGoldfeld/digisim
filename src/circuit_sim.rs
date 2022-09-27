@@ -4,6 +4,7 @@ use std::hash::Hash;
 pub type Tick = u64;
 pub type Ticks = u64;
 
+#[derive(Clone, Copy)]
 pub enum NodeType {
     Or,
     Nor,

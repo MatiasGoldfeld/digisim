@@ -138,6 +138,8 @@ impl Circuit {
         } else {
             update_data.inputs_delta -= 1;
         }
+        // TODO: If output doesn't change, then don't enqueue
+        // Consider dropping inputs, perhaps we dont need both it and output
         enqueue!(*changed_head, update_data.next_changed, node_id);
     }
 
@@ -238,7 +240,15 @@ impl CircuitSim for Circuit {
         let output = &mut self.node_data[node_id].output;
         if *output != val {
             *output = val;
-            self.enqueue_update(node_id);
+            for child in self.node_children[node_id].iter().cloned() {
+                Self::modify(
+                    &mut self.node_update_data,
+                    &mut self.changed_head,
+                    child,
+                    val,
+                );
+            }
+            // self.enqueue_update(node_id);
         }
     }
 

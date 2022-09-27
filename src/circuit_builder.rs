@@ -110,6 +110,13 @@ impl<T: BuilderHooks> Connector<T> {
             .connect(self.output, output.output);
     }
 
+    pub fn set(&self, val: bool) {
+        self.builder
+            .borrow_mut()
+            .circuit
+            .set_input(self.output, val);
+    }
+
     pub fn get_output(&self) -> bool {
         self.builder.borrow().circuit.get_output(self.output)
     }
