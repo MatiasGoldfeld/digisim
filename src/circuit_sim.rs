@@ -27,6 +27,7 @@ pub trait CircuitSim {
     fn new() -> Self;
 
     fn tick(&self) -> Tick;
+    fn num_nodes(&self) -> usize;
     fn get_output(&self, node_id: Self::NodeId) -> bool;
     fn work_left(&self) -> bool;
 

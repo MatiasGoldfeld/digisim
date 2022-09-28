@@ -171,6 +171,10 @@ impl CircuitSim for Circuit {
         self.tick
     }
 
+    fn num_nodes(&self) -> usize {
+        self.node_data.len()
+    }
+
     fn update(&mut self) {
         let mut node_id = self.update_head;
         self.update_head = NodeId::NULL;

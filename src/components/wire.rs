@@ -30,7 +30,7 @@ impl<const BITS: usize> Wire<BITS> {
 
     pub fn read<T>(&self, circuit: &Circuit) -> T
     where
-        T: Unsigned + Shl<usize, Output = T>,
+        T: Unsigned + Shl<usize, Output = T> + std::fmt::Debug,
     {
         let mut sum = T::zero();
         for (bit, node_id) in self.0.iter().cloned().enumerate() {
@@ -43,10 +43,10 @@ impl<const BITS: usize> Wire<BITS> {
 
     pub fn set<T>(&self, circuit: &mut Circuit, val: T)
     where
-        T: Unsigned + Copy + BitAnd<T, Output = T> + Shl<usize, Output = T>,
+        T: Unsigned + Copy + BitAnd<T, Output = T> + Shl<usize, Output = T> + std::fmt::Debug,
     {
         for (bit, node_id) in self.0.iter().cloned().enumerate() {
-            let bit_val = (val & (T::one() << bit)).is_one();
+            let bit_val = (val & (T::one() << bit)) != T::zero();
             circuit.set_input(node_id, bit_val);
         }
     }
@@ -153,3 +153,30 @@ read_signed!(i32, u32);
 read_signed!(i64, u64);
 read_signed!(i128, u128);
 read_signed!(isize, usize);
+
+#[cfg(test)]
+mod test {
+    use crate::Circuit;
+
+    use super::Wire;
+
+    #[test]
+    fn set_read_test() {
+        let mut circuit = Circuit::default();
+        let wire = Wire::<16>::new(&mut circuit);
+
+        assert_eq!(wire.read::<u16>(&mut circuit), 0, "uninitialized");
+
+        wire.set(&mut circuit, 1u16);
+        assert_eq!(wire.read::<u16>(&mut circuit), 1);
+
+        wire.set(&mut circuit, 420u16);
+        assert_eq!(wire.read::<u16>(&mut circuit), 420);
+
+        wire.set(&mut circuit, u16::MAX);
+        assert_eq!(wire.read::<u16>(&mut circuit), u16::MAX);
+
+        wire.set(&mut circuit, u16::MAX as u32 + 1);
+        assert_eq!(wire.read::<u16>(&mut circuit), 0);
+    }
+}

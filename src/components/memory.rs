@@ -186,8 +186,14 @@ mod test {
 
         assert_eq!(sram.get(&mut circuit, 12), 0);
 
-        // TODO: Get SRAM working
         sram.set(&mut circuit, 12, 5);
         assert_eq!(sram.get(&mut circuit, 12), 5);
+
+        sram.set(&mut circuit, 42, 18);
+        assert_eq!(sram.get(&mut circuit, 42), 18);
+        assert_eq!(sram.get(&mut circuit, 12), 5);
+
+        sram.set(&mut circuit, 12, 99);
+        assert_eq!(sram.get(&mut circuit, 12), 99);
     }
 }
