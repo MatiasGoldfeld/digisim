@@ -38,15 +38,11 @@ pub fn create_d_latch<T: BuilderHooks>(input: Connector<T>, enable: Connector<T>
 
 pub fn create_d_latch2(
     circuit: &mut Circuit,
-    input: NodeId,
+    input_pos: NodeId,
+    input_neg: NodeId,
     enable: NodeId,
     write: NodeId,
 ) -> NodeId {
-    let input_pos = circuit.create_node(Or);
-    let input_neg = circuit.create_node(Nor);
-    circuit.connect(input, input_pos);
-    circuit.connect(input, input_neg);
-
     let q_reset = circuit.create_node(And);
     circuit.connect(input_neg, q_reset);
     circuit.connect(enable, q_reset);
@@ -88,24 +84,67 @@ fn create_sram_cell<const BITS: usize>(
     enable: NodeId,
     write: NodeId,
 ) -> Wire<BITS> {
-    input.map(|input| create_d_latch2(circuit, input, enable, write))
+    input.map(|input| {
+        let input_pos = circuit.create_node(Or);
+        let input_neg = circuit.create_node(Nor);
+        circuit.connect(input, input_pos);
+        circuit.connect(input, input_neg);
+        create_d_latch2(circuit, input_pos, input_neg, enable, write)
+    })
 }
 
 impl Sram<16, 16> {
     pub fn new<const CELLS: usize>(circuit: &mut Circuit) -> Self {
         let address = Wire::new(circuit);
         let input = Wire::new(circuit);
+
         let write = circuit.create_node(NodeType::Or);
-        // let addr0 = address.slice::<0, 4>();
-        // let addr1 = address.slice::<4, 4>();
-        // let addr2 = address.slice::<8, 4>();
-        // let addr3 = address.slice::<12, 4>();
+        // Needs to be delayed by 2 ticks to match with the address decode
+        let write_delay_1 = circuit.create_node(NodeType::Or);
+        let write_delay_2 = circuit.create_node(NodeType::Or);
+        circuit.connect(write, write_delay_1);
+        circuit.connect(write_delay_1, write_delay_2);
+
         let enables = address.decode::<CELLS>(circuit);
         let output = Wire::new(circuit);
-        let mut cells = [Wire::uninit(); CELLS];
+        for enable in enables.iter().cloned() {
+            create_sram_cell(circuit, input, enable, write_delay_2).connect(circuit, &output);
+        }
+
+        Self {
+            address,
+            input,
+            output,
+            write,
+        }
+    }
+
+    pub fn new_full_2d(circuit: &mut Circuit) -> Self {
+        const CELLS: usize = 1 << 16;
+        let address = Wire::new(circuit);
+        let input = Wire::new(circuit);
+
+        let write = circuit.create_node(NodeType::Or);
+        // Needs to be delayed by 2 ticks to match with the address decode
+        let write_delay_1 = circuit.create_node(NodeType::Or);
+        let write_delay_2 = circuit.create_node(NodeType::Or);
+        let write_delay_3 = circuit.create_node(NodeType::Or);
+        circuit.connect(write, write_delay_1);
+        circuit.connect(write_delay_1, write_delay_2);
+        circuit.connect(write_delay_2, write_delay_3);
+
+        let sel0 = address.slice::<0, 8>().decode::<256>(circuit);
+        let sel1 = address.slice::<8, 8>().decode::<256>(circuit);
+
+        let output = Wire::new(circuit);
         for i in 0..CELLS {
-            cells[i] = create_sram_cell(circuit, input, enables[i], write);
-            cells[i].connect(circuit, &output);
+            let i0 = i & ((1 << 8) - 1);
+            let i1 = i >> 8;
+            let enable = circuit.create_node(And);
+            circuit.connect(sel0[i0], enable);
+            circuit.connect(sel1[i1], enable);
+
+            create_sram_cell(circuit, input, enable, write_delay_2).connect(circuit, &output);
         }
 
         Self {
@@ -123,6 +162,7 @@ impl Sram<16, 16> {
         circuit.set_input(self.write, true);
         circuit.run_until_done();
         circuit.set_input(self.write, false);
+        circuit.run(1);
     }
 
     pub fn get(&self, circuit: &mut Circuit, address: u16) -> u16 {
@@ -182,7 +222,8 @@ mod test {
     #[test]
     fn sram_test() {
         let mut circuit = Circuit::default();
-        let sram = Sram::new::<1024>(&mut circuit);
+        // let sram = Sram::new::<1024>(&mut circuit);
+        let sram = Sram::new_full_2d(&mut circuit);
 
         assert_eq!(sram.get(&mut circuit, 12), 0);
 
@@ -195,5 +236,12 @@ mod test {
 
         sram.set(&mut circuit, 12, 99);
         assert_eq!(sram.get(&mut circuit, 12), 99);
+
+        println!("got here!!");
+
+        sram.set(&mut circuit, 67, 50);
+        sram.set(&mut circuit, 68, 100);
+        assert_eq!(sram.get(&mut circuit, 67), 50);
+        assert_eq!(sram.get(&mut circuit, 68), 100);
     }
 }

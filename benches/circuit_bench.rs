@@ -48,13 +48,14 @@ fn adder_benches(c: &mut Criterion) {
 
 fn sram_benches(c: &mut Criterion) {
     let mut circuit = Circuit::new();
-    let sram = Sram::new::<{ 1 << 16 }>(&mut circuit);
+    let sram = Sram::new::<{ 1 << 12 }>(&mut circuit);
+    // let sram = Sram::new_full_2d(&mut circuit);
     println!("{}", circuit.num_nodes());
 
     c.bench_function("131K SRAM store", |b| {
         let mut rng = rand::rngs::StdRng::from_entropy();
         b.iter_batched(
-            move || (rng.next_u32() as u16, rng.next_u32() as u16),
+            move || (rng.next_u32() as u16 >> 4, rng.next_u32() as u16),
             |(address, val)| sram.set(&mut circuit, address, val),
             criterion::BatchSize::SmallInput,
         )
@@ -65,7 +66,7 @@ fn sram_benches(c: &mut Criterion) {
     c.bench_function("131K SRAM load", |b| {
         let mut rng = rand::rngs::StdRng::from_entropy();
         b.iter_batched(
-            move || (rng.next_u32() as u16),
+            move || (rng.next_u32() as u16 >> 4),
             |address| sram.get(&mut circuit, address),
             criterion::BatchSize::SmallInput,
         )
